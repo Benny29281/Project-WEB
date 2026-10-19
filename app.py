@@ -35,10 +35,10 @@ app.config.update(
 )
 
 # Set SCRAPE_ALLOWED_HOSTS to a comma-separated list of domains you are
-# authorized to monitor. The default matches the existing Fujishop UI.
+# authorized to monitor. Replace the example host with your approved store domains.
 ALLOWED_HOSTS = {
     host.strip().lower().rstrip(".")
-    for host in os.environ.get("SCRAPE_ALLOWED_HOSTS", "fujishop.id").split(",")
+    for host in os.environ.get("SCRAPE_ALLOWED_HOSTS", "toko.example").split(",")
     if host.strip()
 }
 SCRAPER_USER_AGENT = os.environ.get(

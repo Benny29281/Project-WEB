@@ -17,13 +17,13 @@ py -m pip install -r requirements.txt
 $env:SECRET_KEY = (py -c "import secrets; print(secrets.token_hex(32))")
 $env:ADMIN_USERNAME = "admin"
 $env:ADMIN_PASSWORD = "ganti-dengan-password-kuat"
-$env:SCRAPE_ALLOWED_HOSTS = "fujishop.id"
+$env:SCRAPE_ALLOWED_HOSTS = "toko.example"
 py app.py
 ```
 
 Saat pertama dijalankan, aplikasi membuat tabel dan akun admin dari `ADMIN_USERNAME` serta `ADMIN_PASSWORD`. Akun bawaan dengan password tetap tidak dibuat. SQLite digunakan secara default; untuk MySQL, atur `DATABASE_URL`, misalnya `mysql+pymysql://user:password@localhost/project_web`.
 
-Atur `SCRAPE_ALLOWED_HOSTS` sebagai daftar domain dipisahkan koma, contohnya `fujishop.id,toko.example`. Hanya HTTPS dan host yang tercantum persis yang diterima. Pastikan kamu memiliki izin untuk memantau situs tersebut. Scraper memakai User-Agent yang mengidentifikasi aplikasi, tidak mengikuti redirect, dan memberi jeda antar target. Gunakan API resmi jika tersedia dan patuhi ketentuan situs.
+Atur `SCRAPE_ALLOWED_HOSTS` sebagai daftar domain dipisahkan koma, contohnya `toko.example,shop.example`. Ganti domain contoh tersebut dengan domain toko yang memang ingin dan diizinkan untuk kamu pantau. Hanya HTTPS dan host yang tercantum persis yang diterima. Scraper memakai User-Agent yang mengidentifikasi aplikasi, tidak mengikuti redirect, dan memberi jeda antar target. Gunakan API resmi jika tersedia dan patuhi ketentuan situs.
 
 Untuk deployment HTTPS, set `$env:COOKIE_SECURE = "1"`. `SECRET_KEY`, password admin, dan database URL jangan dimasukkan ke source control.
 
