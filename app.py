@@ -3,16 +3,20 @@ import json
 import os
 import re
 import secrets
+import smtplib
+import ssl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlsplit
+from email.message import EmailMessage
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
 from flask_login import (LoginManager, UserMixin, current_user, login_required,
                          login_user, logout_user)
@@ -20,9 +24,38 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
+load_dotenv()
+
+
+def get_session_secret():
+    configured_secret = os.environ.get("SECRET_KEY")
+    if configured_secret:
+        return configured_secret
+
+    instance_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance")
+    secret_path = os.path.join(instance_dir, ".session_secret")
+    os.makedirs(instance_dir, exist_ok=True)
+    try:
+        with open(secret_path, "r", encoding="utf-8") as secret_file:
+            saved_secret = secret_file.read().strip()
+            if saved_secret:
+                return saved_secret
+    except FileNotFoundError:
+        pass
+
+    generated_secret = secrets.token_hex(32)
+    try:
+        with open(secret_path, "x", encoding="utf-8") as secret_file:
+            secret_file.write(generated_secret)
+        return generated_secret
+    except FileExistsError:
+        with open(secret_path, "r", encoding="utf-8") as secret_file:
+            return secret_file.read().strip()
+
+
 app = Flask(__name__)
 app.config.update(
-    SECRET_KEY=os.environ.get("SECRET_KEY") or secrets.token_hex(32),
+    SECRET_KEY=get_session_secret(),
     SQLALCHEMY_DATABASE_URI=os.environ.get(
         "DATABASE_URL", "sqlite:///project_web.db"
     ),
@@ -34,16 +67,38 @@ app.config.update(
     MAX_CONTENT_LENGTH=16 * 1024,
 )
 
-# Set SCRAPE_ALLOWED_HOSTS to a comma-separated list of domains you are
-# authorized to monitor. Replace the example host with your approved store domains.
+# Set SCRAPE_ALLOWED_HOSTS to a comma-separated list of approved store domains.
+DEFAULT_ALLOWED_HOSTS = (
+    "instaxshop.co.id,www.instaxshop.co.id,jpckemang.com,www.jpckemang.com,"
+    "fujishop.id,www.fujishop.id,galaxy.co.id,www.galaxy.co.id,"
+    "doss.co.id,www.doss.co.id,focusnusantara.com,www.focusnusantara.com,"
+    "blibli.com,www.blibli.com,plazakamera.com,www.plazakamera.com,"
+    "tokopedia.com,www.tokopedia.com,taskamera.id,www.taskamera.id,"
+    "shop.anekafoto.com,camera.co.id,www.camera.co.id,"
+    "hopmarket.id,www.hopmarket.id,winstore.co.id,www.winstore.co.id,"
+    "sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id"
+)
 ALLOWED_HOSTS = {
     host.strip().lower().rstrip(".")
-    for host in os.environ.get("SCRAPE_ALLOWED_HOSTS", "toko.example").split(",")
+    for host in DEFAULT_ALLOWED_HOSTS.split(",")
     if host.strip()
 }
+ALLOWED_HOSTS.update(
+    host.strip().lower().rstrip(".")
+    for host in os.environ.get("SCRAPE_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+)
 SCRAPER_USER_AGENT = os.environ.get(
     "SCRAPER_USER_AGENT", "ProjectWebScraping/1.0 (stock-monitor; contact: admin)"
 )
+MAIL_SERVER = os.environ.get("MAIL_SERVER", "").strip()
+MAIL_PORT = os.environ.get("MAIL_PORT", "587").strip()
+MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "").strip()
+MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "")
+MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER", "").strip()
+STOCK_ALERT_EMAIL = os.environ.get("STOCK_ALERT_EMAIL", "").strip()
+MAIL_USE_TLS = os.environ.get("MAIL_USE_TLS", "1") == "1"
+MAIL_USE_SSL = os.environ.get("MAIL_USE_SSL", "0") == "1"
 
 LANGUAGES = {"id": "Bahasa Indonesia", "en": "English", "zh": "中文", "ko": "한국어"}
 TEXT = {
@@ -53,11 +108,14 @@ TEXT = {
         "dashboard_intro": "Pantau ketersediaan produk dari halaman toko yang kamu tambahkan.",
         "admin": "Admin", "total_products": "Total produk", "stored_products": "Produk yang tersimpan di pantauan",
         "available": "Tersedia", "available_desc": "Produk dengan stok tersedia", "out_of_stock": "Habis",
-        "out_desc": "Produk yang terdeteksi habis", "add_target": "Tambah target",
-        "add_help": "Masukkan URL HTTPS dari domain yang diizinkan.", "url_label": "URL halaman produk",
+        "out_desc": "Produk yang terdeteksi habis", "unknown_stock": "Tidak diketahui",
+        "unknown_desc": "Halaman tidak memberi tanda stok yang jelas", "add_target": "Tambah target",
+        "add_help": "Untuk membaca banyak produk, masukkan URL kategori/koleksi, misalnya https://instaxshop.co.id/collections/camera.", "url_label": "URL halaman produk atau kategori",
         "add_url": "Tambah URL", "monitored_urls": "URL dipantau", "targets": "target",
         "check_now": "Cek sekarang", "no_urls": "Belum ada URL pantauan.", "product_list": "Daftar produk",
-        "last_check_help": "Status stok dari pengecekan terakhir", "search": "Cari produk...",
+        "last_check_help": "Status stok dari pengecekan terakhir", "search": "Cari kata kunci produk...",
+        "search_scope": "Pencarian mencakup produk yang sudah terbaca dari URL toko pantauan.",
+        "search_prompt": "Masukkan kata kunci untuk menampilkan produk dan data pantauannya.",
         "all_status": "Semua status", "number": "No.", "product": "Produk", "stock_status": "Status stok",
         "last_checked": "Terakhir dicek", "source": "Sumber", "no_products": "Belum ada produk",
         "add_then_check": "Tambahkan URL toko, lalu mulai pengecekan.",
@@ -67,12 +125,12 @@ TEXT = {
         "password": "Kata sandi", "login": "Masuk", "login_error": "Nama pengguna atau kata sandi salah!",
         "check_started": "Pengecekan stok dimulai di latar belakang.",
         "url_deleted": "URL dan produk terkait berhasil dihapus.",
-        "url_invalid": "URL harus HTTPS dan domainnya harus ada di daftar domain yang diizinkan.",
+        "url_invalid": "URL harus HTTPS dan host persisnya harus tercantum di SCRAPE_ALLOWED_HOSTS sebelum aplikasi dijalankan.",
         "url_duplicate": "URL tersebut sudah ada dalam daftar pantauan.",
         "url_added": "URL ditambahkan. Pengecekan berjalan di latar belakang.",
         "delete_target": "Hapus URL", "confirm_delete": "Hapus URL ini beserta produk terkait?",
         "language": "Bahasa", "product_summary": "Ringkasan produk", "filter_status": "Filter status stok",
-        "price_comparison": "Perbandingan harga", "price_chart_help": "Grafik dipisahkan per toko (maksimal 8 produk per toko)",
+        "price_comparison": "Perbandingan harga", "price_chart_help": "Semua produk yang memiliki harga ditampilkan, dipisahkan per toko",
         "store": "Toko", "all_stores": "Semua toko", "price": "Harga", "sort_price": "Urutkan harga",
         "cheapest_first": "Termurah ke termahal", "expensive_first": "Termahal ke termurah",
         "no_price_data": "Belum ada harga yang terbaca. Jalankan pengecekan stok terlebih dahulu.",
@@ -92,11 +150,14 @@ TEXT = {
         "dashboard_intro": "Track product availability from the store pages you add.", "admin": "Admin",
         "total_products": "Total products", "stored_products": "Products saved for monitoring",
         "available": "In stock", "available_desc": "Products currently available", "out_of_stock": "Out of stock",
-        "out_desc": "Products detected as out of stock", "add_target": "Add a target",
-        "add_help": "Enter an HTTPS URL from an allowed domain.", "url_label": "Product page URL",
+        "out_desc": "Products detected as out of stock", "unknown_stock": "Unknown",
+        "unknown_desc": "The page did not provide a clear stock signal", "add_target": "Add a target",
+        "add_help": "For many products, use a category or collection URL, such as https://instaxshop.co.id/collections/camera.", "url_label": "Product or category URL",
         "add_url": "Add URL", "monitored_urls": "Monitored URLs", "targets": "targets",
         "check_now": "Check now", "no_urls": "No monitored URLs yet.", "product_list": "Products",
-        "last_check_help": "Stock status from the latest check", "search": "Search products...",
+        "last_check_help": "Stock status from the latest check", "search": "Search product keywords...",
+        "search_scope": "Search covers products already read from monitored store URLs.",
+        "search_prompt": "Enter a keyword to display matching products and monitoring data.",
         "all_status": "All statuses", "number": "No.", "product": "Product", "stock_status": "Stock status",
         "last_checked": "Last checked", "source": "Source", "no_products": "No products yet",
         "add_then_check": "Add a store URL, then start a check.", "no_results": "No products match these filters.",
@@ -104,12 +165,12 @@ TEXT = {
         "footer": "Stock monitoring", "login_title": "Admin sign in", "username": "Username",
         "password": "Password", "login": "Sign in", "login_error": "Incorrect username or password!",
         "check_started": "Stock check started in the background.", "url_deleted": "URL and related products were deleted.",
-        "url_invalid": "Use HTTPS and a domain on the allowed-domain list.",
+        "url_invalid": "Use HTTPS and make sure the exact hostname is in SCRAPE_ALLOWED_HOSTS before starting the app.",
         "url_duplicate": "That URL is already on the monitoring list.",
         "url_added": "URL added. The check is running in the background.",
         "delete_target": "Delete URL", "confirm_delete": "Delete this URL and its related products?",
         "language": "Language", "product_summary": "Product summary", "filter_status": "Filter stock status",
-        "price_comparison": "Price comparison", "price_chart_help": "Separate chart for each store (up to 8 products per store)",
+        "price_comparison": "Price comparison", "price_chart_help": "All products with prices are shown, separated by store",
         "store": "Store", "all_stores": "All stores", "price": "Price", "sort_price": "Sort by price",
         "cheapest_first": "Lowest to highest", "expensive_first": "Highest to lowest",
         "no_price_data": "No prices found yet. Run a stock check first.", "price_unavailable": "Price unavailable",
@@ -140,7 +201,7 @@ TEXT = {
         "url_duplicate": "该链接已在监控列表中。", "url_added": "链接已添加，正在后台检查。",
         "delete_target": "删除链接", "confirm_delete": "删除此链接及其相关商品？",
         "language": "语言", "product_summary": "商品概览", "filter_status": "筛选库存状态",
-        "price_comparison": "价格对比", "price_chart_help": "每家商店单独显示图表（每家最多 8 件商品）",
+        "price_comparison": "价格对比", "price_chart_help": "显示所有有价格的商品，并按商店分开",
         "store": "商店", "all_stores": "所有商店", "price": "价格", "sort_price": "按价格排序",
         "cheapest_first": "从低到高", "expensive_first": "从高到低",
         "no_price_data": "尚未读取到价格。请先运行库存检查。", "price_unavailable": "无法读取价格",
@@ -171,7 +232,7 @@ TEXT = {
         "url_added": "URL을 추가했습니다. 백그라운드에서 확인 중입니다.",
         "delete_target": "URL 삭제", "confirm_delete": "이 URL과 관련 상품을 삭제할까요?",
         "language": "언어", "product_summary": "상품 요약", "filter_status": "재고 상태 필터",
-        "price_comparison": "가격 비교", "price_chart_help": "매장별로 그래프 분리 (매장당 최대 8개 상품)",
+        "price_comparison": "가격 비교", "price_chart_help": "가격이 있는 모든 상품을 매장별로 표시합니다",
         "store": "매장", "all_stores": "모든 매장", "price": "가격", "sort_price": "가격순 정렬",
         "cheapest_first": "낮은 가격순", "expensive_first": "높은 가격순",
         "no_price_data": "아직 가격을 읽지 못했습니다. 재고 확인을 먼저 실행하세요.", "price_unavailable": "가격 정보 없음",
@@ -185,6 +246,20 @@ TEXT = {
         "best_price": "최저가", "other_offers": "다른 매장 가격", "savings": "가격 차이",
     },
 }
+
+# Keep the stock-confidence and keyword-search labels available in every UI language.
+TEXT["zh"].update({
+    "unknown_stock": "\u672a\u77e5", "unknown_desc": "\u9875\u9762\u6ca1\u6709\u660e\u786e\u7684\u5e93\u5b58\u4fe1\u53f7",
+    "search": "\u6309\u5173\u952e\u8bcd\u641c\u7d22\u5546\u54c1...",
+    "search_scope": "\u641c\u7d22\u5df2\u4ece\u76d1\u63a7\u5546\u5e97\u9875\u9762\u8bfb\u53d6\u7684\u5546\u54c1\u3002",
+    "search_prompt": "\u8f93\u5165\u5173\u952e\u8bcd\u4ee5\u663e\u793a\u5339\u914d\u7684\u5546\u54c1\u548c\u76d1\u63a7\u6570\u636e\u3002",
+})
+TEXT["ko"].update({
+    "unknown_stock": "\uc54c \uc218 \uc5c6\uc74c", "unknown_desc": "\ud398\uc774\uc9c0\uc5d0 \uba85\ud655\ud55c \uc7ac\uace0 \ud45c\uc2dc\uac00 \uc5c6\uc2b5\ub2c8\ub2e4",
+    "search": "\ud0a4\uc6cc\ub4dc\ub85c \uc0c1\ud488 \uac80\uc0c9...",
+    "search_scope": "\uac10\uc2dc \uc911\uc778 \ub9e4\uc7a5 URL\uc5d0\uc11c \uc77d\uc740 \uc0c1\ud488\uc744 \uac80\uc0c9\ud569\ub2c8\ub2e4.",
+    "search_prompt": "\ud0a4\uc6cc\ub4dc\ub97c \uc785\ub825\ud558\uba74 \uc77c\uce58\ud558\ub294 \uc0c1\ud488\uacfc \ubaa8\ub2c8\ud130\ub9c1 \ub370\uc774\ud130\uac00 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
+})
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
@@ -244,6 +319,48 @@ def normalize_product_name(value):
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
+def send_stock_status_email(product_name, store, product_url, status):
+    """Email a one-time alert when a monitored product changes known stock status."""
+    if not all((MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD,
+                MAIL_DEFAULT_SENDER, STOCK_ALERT_EMAIL)):
+        app.logger.info("Notifikasi email dilewati karena pengaturan SMTP belum lengkap")
+        return False
+    try:
+        email = EmailMessage()
+        safe_product_name = re.sub(r"[\r\n]+", " ", str(product_name))
+        status_label = "tersedia" if status == "TERSEDIA" else "habis"
+        email["Subject"] = f"Stok {status_label}: {safe_product_name}"
+        email["From"] = MAIL_DEFAULT_SENDER
+        email["To"] = STOCK_ALERT_EMAIL
+        email.set_content(
+            f"Status stok produk berubah menjadi: {status_label}.\n\n"
+            f"Produk: {product_name}\n"
+            f"Toko: {store}\n"
+            f"Sumber: {product_url}"
+        )
+        port = int(MAIL_PORT)
+        if MAIL_USE_SSL:
+            with smtplib.SMTP_SSL(
+                MAIL_SERVER, port, timeout=15,
+                context=ssl.create_default_context(),
+            ) as smtp:
+                smtp.login(MAIL_USERNAME, MAIL_PASSWORD)
+                smtp.send_message(email)
+        else:
+            with smtplib.SMTP(MAIL_SERVER, port, timeout=15) as smtp:
+                smtp.ehlo()
+                if MAIL_USE_TLS:
+                    smtp.starttls(context=ssl.create_default_context())
+                    smtp.ehlo()
+                smtp.login(MAIL_USERNAME, MAIL_PASSWORD)
+                smtp.send_message(email)
+        app.logger.info("Notifikasi perubahan stok email berhasil dikirim")
+        return True
+    except (OSError, smtplib.SMTPException, ValueError):
+        app.logger.warning("Pengiriman notifikasi perubahan stok email gagal")
+        return False
+
+
 @login_manager.user_loader
 def load_user(user_id):
     try:
@@ -270,6 +387,7 @@ def inject_csrf_token():
         "t": TEXT[language],
         "current_language": language,
         "languages": LANGUAGES,
+        "allowed_hosts": sorted(ALLOWED_HOSTS),
     }
 
 
@@ -356,10 +474,17 @@ def _schema_products(soup):
                     if isinstance(offers, list):
                         offers = offers[0] if offers else {}
                 availability = str(offers.get("availability", "")).lower() if isinstance(offers, dict) else ""
+                if "outofstock" in availability or "soldout" in availability:
+                    stock_status = "HABIS"
+                elif any(marker in availability for marker in ("instock", "limitedavailability", "preorder", "backorder")):
+                    stock_status = "TERSEDIA"
+                else:
+                    stock_status = "TIDAK DIKETAHUI"
                 found.append({
                     "name": str(value["name"]).strip(),
                     "price": parse_price(offers.get("price") or offers.get("lowPrice")) if isinstance(offers, dict) else None,
-                    "status": "HABIS" if "outofstock" in availability else "TERSEDIA",
+                    "status": stock_status,
+                    "product_url": str(value.get("url", "")).strip(),
                 })
             for child in value.values():
                 visit(child)
@@ -388,6 +513,13 @@ def _price_in(element):
             parsed = parse_price(raw)
             if parsed is not None:
                 return parsed
+    # Storefronts may render prices as plain text without standard price classes.
+    for text_value in element.stripped_strings:
+        match = re.search(r"\bRp\.?\s*\d[\d.,]*", text_value, flags=re.IGNORECASE)
+        if match:
+            parsed = parse_price(match.group(0))
+            if parsed is not None:
+                return parsed
     return None
 
 
@@ -398,13 +530,17 @@ def _stock_in(element):
         class_names.update(str(item).lower().replace("_", "-") for item in classes)
     content = element.get_text(" ", strip=True).lower()
     if class_names.intersection({"outofstock", "out-of-stock", "sold-out", "soldout"}) or any(
-        phrase in content for phrase in ("sold out", "out of stock", "habis", "stok kosong")
+        phrase in content for phrase in ("sold out", "out of stock", "unavailable", "not available", "stock kosong", "stock habis", "stok habis", "stok kosong", "tidak tersedia", "\u65e0\u8d27", "\u7f3a\u8d27", "\ud488\uc808")
     ):
         return "HABIS"
-    return "TERSEDIA"
+    if class_names.intersection({"instock", "in-stock", "available", "product-available"}) or any(
+        phrase in content for phrase in ("in stock", "available", "tersedia", "stok tersedia", "ready stock", "\u6709\u8d27", "\uc7ac\uace0 \uc788\uc74c")
+    ) or re.search(r"\btersisa\s+\d+\s+produk\b", content):
+        return "TERSEDIA"
+    return "TIDAK DIKETAHUI"
 
 
-def extract_products(soup):
+def extract_products(soup, source_host=""):
     """Extract structured products first, then common WooCommerce/Shopify cards."""
     products = {}
     for item in _schema_products(soup):
@@ -412,7 +548,8 @@ def extract_products(soup):
         products[key] = item
 
     cards = soup.select(
-        "li.product, .product-card, .product-item, .grid-product, "
+        "li.product, li.grid__item, .product-card, .product-card-wrapper, "
+        ".product-item, .product-grid-item, .grid-product, "
         ".card-wrapper, [data-product-id], .product"
     )
     for card in cards:
@@ -430,13 +567,17 @@ def extract_products(soup):
             "name": name,
             "price": _price_in(card),
             "status": _stock_in(card),
+            "product_url": (card.select_one('a[href*="/products/"]').get("href")
+                            if card.select_one('a[href*="/products/"]') else ""),
         }
         previous = products.get(key)
         if previous:
             if item["price"] is not None:
                 previous["price"] = item["price"]
-            if item["status"] == "HABIS":
-                previous["status"] = "HABIS"
+            if item["status"] != "TIDAK DIKETAHUI":
+                previous["status"] = item["status"]
+            if item.get("product_url"):
+                previous["product_url"] = item["product_url"]
         else:
             products[key] = item
 
@@ -454,6 +595,181 @@ def extract_products(soup):
                 "price": page_price,
                 "status": _stock_in(soup),
             }
+
+    # Some stores use nonstandard product card markup. Find the smallest ancestor
+    # containing a single product link; Blibli uses /p/ paths instead of /products/.
+    is_blibli = source_host in {"blibli.com", "www.blibli.com"}
+    product_links = soup.select('a[href*="/products/"]')
+    if is_blibli:
+        product_links.extend(soup.select('a[href^="/p/"], a[href*="blibli.com/p/"]'))
+    for link in product_links:
+        card = None
+        for parent in link.parents:
+            if not parent.name or parent.name in {"body", "html"}:
+                break
+            card_links = parent.select('a[href*="/products/"]')
+            if is_blibli:
+                card_links.extend(parent.select('a[href^="/p/"], a[href*="blibli.com/p/"]'))
+            product_hrefs = {urlsplit(candidate.get("href", "")).path for candidate in card_links}
+            if len(product_hrefs) > 1:
+                break
+            if product_hrefs:
+                card = parent
+        if card is None:
+            continue
+        title = card.select_one(
+            ".card__heading, .product-title, .product__title, h2, h3"
+        )
+        name = (title.get_text(" ", strip=True) if title else "") or link.get_text(" ", strip=True)
+        if not name:
+            image = link.select_one("img[alt]")
+            name = (link.get("title") or link.get("aria-label")
+                    or (image.get("alt") if image else "") or "")
+        name = name.strip()
+        if not name:
+            continue
+        key = name.casefold()
+        item = {
+            "name": name, "price": _price_in(card), "status": _stock_in(card),
+            "product_url": link.get("href", ""),
+        }
+        previous = products.get(key)
+        if previous:
+            if item["price"] is not None:
+                previous["price"] = item["price"]
+            if item["status"] != "TIDAK DIKETAHUI":
+                previous["status"] = item["status"]
+            if item.get("product_url"):
+                previous["product_url"] = item["product_url"]
+        else:
+            products[key] = item
+    return list(products.values())
+
+
+def _shopify_product_details(listing_url, product_url, headers):
+    """Read Shopify's public product JSON for accurate variant price/availability."""
+    if not product_url:
+        return None
+    product_page = urljoin(listing_url, product_url)
+    page_parts = urlsplit(product_page)
+    listing_host = (urlsplit(listing_url).hostname or "").lower().rstrip(".")
+    if (not validate_target_url(product_page)
+            or (page_parts.hostname or "").lower().rstrip(".") != listing_host
+            or "/products/" not in page_parts.path):
+        return None
+    api_url = page_parts._replace(path=page_parts.path.rstrip("/") + ".js", query="", fragment="").geturl()
+    try:
+        response = requests.get(
+            api_url, headers={**headers, "Accept": "application/json"},
+            timeout=(5, 15), allow_redirects=False,
+        )
+        if response.status_code != 200:
+            app.logger.info("Detail produk merespons HTTP %s", response.status_code)
+            return None
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+    variants = data.get("variants") or []
+    available_variants = [variant for variant in variants if variant.get("available") is True]
+    price_variants = available_variants or variants
+    prices = []
+    for variant in price_variants:
+        raw_price = variant.get("price")
+        if raw_price is not None:
+            try:
+                # Shopify Ajax Product API reports monetary amounts in subunits.
+                prices.append((Decimal(str(raw_price)) / Decimal(100)).quantize(Decimal("0.01")))
+            except (InvalidOperation, ValueError):
+                parsed = parse_price(raw_price)
+                if parsed is not None:
+                    prices.append(parsed)
+    if not prices and data.get("price") is not None:
+        try:
+            prices.append((Decimal(str(data["price"])) / Decimal(100)).quantize(Decimal("0.01")))
+        except (InvalidOperation, ValueError):
+            parsed = parse_price(data["price"])
+            if parsed is not None:
+                prices.append(parsed)
+
+    if available_variants:
+        stock_status = "TERSEDIA"
+    elif variants or data.get("available") is False:
+        stock_status = "HABIS"
+    else:
+        stock_status = "TIDAK DIKETAHUI"
+    return {"price": min(prices) if prices else None, "status": stock_status}
+
+
+def _next_catalog_page(soup, current_url, original_host):
+    """Return a same-host HTTPS pagination URL, if the page exposes one."""
+    for link in soup.find_all("a", href=True):
+        label = " ".join((link.get("aria-label", ""), link.get_text(" ", strip=True))).lower()
+        classes = " ".join(link.get("class", [])).lower()
+        candidate = urljoin(current_url, link.get("href"))
+        direction = parse_qs(urlsplit(candidate).query).get("direction", [])
+        rel = link.get("rel", [])
+        if isinstance(rel, str):
+            rel = rel.split()
+        is_next = (
+            "next" in [str(value).lower() for value in rel]
+            or "next" in label
+            or "load more" in label
+            or "pagination__item--next" in classes
+            or any(value.lower() == "next" for value in direction)
+        )
+        if not is_next:
+            continue
+        if (validate_target_url(candidate)
+                and urlsplit(candidate).hostname.lower().rstrip(".") == original_host):
+            return candidate
+    return None
+
+
+def fetch_catalog_products(target_url, headers):
+    """Read a listing page and its explicit pagination links, with a hard cap."""
+    original_host = (urlsplit(target_url).hostname or "").lower().rstrip(".")
+    current_url = target_url
+    visited = set()
+    products = {}
+    pages_fetched = 0
+    for page_number in range(10):
+        if current_url in visited or not validate_target_url(current_url):
+            break
+        visited.add(current_url)
+        response = requests.get(
+            current_url, headers=headers, timeout=(5, 15), allow_redirects=False,
+        )
+        if response.status_code != 200:
+            app.logger.warning(
+                "Target %s merespons HTTP %s; pengecekan dihentikan",
+                current_url, response.status_code,
+            )
+            break
+        pages_fetched += 1
+        soup = BeautifulSoup(response.text, "html.parser")
+        for product in extract_products(soup, original_host):
+            if original_host in {"galaxy.co.id", "www.galaxy.co.id"}:
+                details = _shopify_product_details(
+                    current_url, product.get("product_url"), headers,
+                )
+                if details:
+                    if details["price"] is not None:
+                        product["price"] = details["price"]
+                    product["status"] = details["status"]
+                    time.sleep(0.25)
+            products[product["name"].casefold()] = product
+        next_url = _next_catalog_page(soup, current_url, original_host)
+        if not next_url:
+            break
+        current_url = next_url
+        if page_number < 9:
+            time.sleep(1)
+    price_count = sum(product["price"] is not None for product in products.values())
+    app.logger.info(
+        "Hasil target %s: %d halaman dibaca, %d produk ditemukan, %d harga terbaca",
+        target_url, pages_fetched, len(products), price_count,
+    )
     return list(products.values())
 
 
@@ -470,23 +786,28 @@ def jalankan_pengecekan_stok():
                     app.logger.warning("Target dilewati karena URL tidak diizinkan")
                     continue
                 try:
-                    response = requests.get(
-                        kategori.url, headers=headers, timeout=(5, 15),
-                        allow_redirects=False,
-                    )
-                    if response.status_code != 200:
-                        app.logger.info("Target merespons HTTP %s", response.status_code)
-                        continue
-
-                    soup = BeautifulSoup(response.text, "html.parser")
+                    catalog_products = fetch_catalog_products(kategori.url, headers)
                     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                    for product in extract_products(soup):
+                    stock_alerts = []
+                    for product in catalog_products:
                         name = product["name"]
                         row = ProdukDetail.query.filter_by(
                             nama_produk=name, url_sumber=kategori.url
                         ).first()
                         if row:
-                            if row.status_stok != product["status"]:
+                            if (product["status"] in {"TERSEDIA", "HABIS"}
+                                    and row.status_stok != product["status"]
+                                    and (product["status"] == "TERSEDIA"
+                                         or row.status_stok == "TERSEDIA")):
+                                stock_alerts.append((
+                                    name,
+                                    store_name(kategori.url),
+                                    product.get("product_url") or kategori.url,
+                                    product["status"],
+                                ))
+                            if (row.status_stok in {"TERSEDIA", "HABIS"}
+                                    and product["status"] in {"TERSEDIA", "HABIS"}
+                                    and row.status_stok != product["status"]):
                                 db.session.add(Notifikasi(
                                     nama_produk=name, toko=store_name(kategori.url), jenis="stok",
                                     nilai_lama=row.status_stok, nilai_baru=product["status"],
@@ -510,6 +831,8 @@ def jalankan_pengecekan_stok():
                             ))
                     db.session.commit()
                     app.logger.info("Pengecekan selesai untuk satu target")
+                    for alert in stock_alerts:
+                        send_stock_status_email(*alert)
                 except requests.RequestException as exc:
                     db.session.rollback()
                     app.logger.warning("Permintaan target gagal: %s", exc.__class__.__name__)
@@ -586,7 +909,9 @@ def hapus_url(id):
 @login_required
 def dashboard():
     if request.method == "POST":
-        url_baru = (request.form.get("url_produk") or "").strip()
+        # Some Markdown copies escape query separators as \&; normalize before
+        # validation/storage so the category filters reach the source unchanged.
+        url_baru = (request.form.get("url_produk") or "").strip().replace("\\&", "&")
         if not validate_target_url(url_baru):
             flash("url_invalid")
         elif KategoriPantauan.query.filter_by(url=url_baru).first():
@@ -627,8 +952,10 @@ def dashboard():
             comparison_groups.append({
                 "name": item["name"], "offers": offers,
                 "best": min(comparable_offers, key=lambda offer: offer["price"]),
-                "difference": max(offer["price"] for offer in comparable_offers)
-                              - min(offer["price"] for offer in comparable_offers),
+                # Show the full listed price spread; stock availability only
+                # influences which offer is highlighted as the best price.
+                "difference": max(offer["price"] for offer in offers)
+                              - min(offer["price"] for offer in offers),
             })
     comparison_groups.sort(key=lambda item: item["difference"], reverse=True)
     notifications = Notifikasi.query.order_by(Notifikasi.dibuat_pada.desc()).limit(30).all()
@@ -636,10 +963,12 @@ def dashboard():
     total_produk = len(daftar_produk)
     total_tersedia = sum(p.status_stok == "TERSEDIA" for p in daftar_produk)
     total_habis = sum(p.status_stok == "HABIS" for p in daftar_produk)
+    total_tidak_diketahui = sum(p.status_stok == "TIDAK DIKETAHUI" for p in daftar_produk)
     return render_template(
         "dashboard.html", daftar_kategori=daftar_kategori,
         daftar_produk=daftar_produk, total_produk=total_produk,
         total_tersedia=total_tersedia, total_habis=total_habis,
+        total_tidak_diketahui=total_tidak_diketahui,
         daftar_toko=daftar_toko, store_for_product=store_for_product,
         comparison_groups=comparison_groups, notifications=notifications,
         unread_notifications=unread_notifications,

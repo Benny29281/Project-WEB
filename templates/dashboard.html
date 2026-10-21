@@ -154,39 +154,50 @@
           {% if messages %}
             <div class="alert alert-primary border-0 rounded-3 shadow-sm mb-4" role="status">
                 <i class="bi bi-info-circle me-2"></i>{{ t.get(messages[0], messages[0]) }}
+                {% if messages[0] == 'url_invalid' %}<span class="d-block small mt-2">{{ allowed_hosts|join(', ') }}</span>{% endif %}
             </div>
           {% endif %}
         {% endwith %}
 
         <section id="overview" class="row g-3 mb-3" aria-label="{{ t.product_summary }}">
-            <div class="col-sm-6 col-xl-4">
+            <div class="col-sm-6 col-xl-3">
                 <div class="card-clean stat-card p-4 h-100 text-primary">
                     <div class="d-flex justify-content-between align-items-start mb-4">
                         <span class="stat-label">{{ t.total_products }}</span>
                         <span class="stat-icon bg-primary-subtle"><i class="bi bi-grid-1x2"></i></span>
                     </div>
-                    <div class="stat-number text-dark">{{ total_produk }}</div>
+                    <div class="stat-number text-dark" id="matchedTotal">0</div>
                     <div class="small text-secondary mt-2">{{ t.stored_products }}</div>
                 </div>
             </div>
-            <div class="col-sm-6 col-xl-4">
+            <div class="col-sm-6 col-xl-3">
                 <div class="card-clean stat-card p-4 h-100 text-success">
                     <div class="d-flex justify-content-between align-items-start mb-4">
                         <span class="stat-label">{{ t.available }}</span>
                         <span class="stat-icon bg-success-subtle"><i class="bi bi-check2-circle"></i></span>
                     </div>
-                    <div class="stat-number text-dark">{{ total_tersedia }}</div>
+                    <div class="stat-number text-dark" id="matchedAvailable">0</div>
                     <div class="small text-secondary mt-2">{{ t.available_desc }}</div>
                 </div>
             </div>
-            <div class="col-sm-6 col-xl-4">
+            <div class="col-sm-6 col-xl-3">
                 <div class="card-clean stat-card p-4 h-100 text-danger">
                     <div class="d-flex justify-content-between align-items-start mb-4">
                         <span class="stat-label">{{ t.out_of_stock }}</span>
                         <span class="stat-icon bg-danger-subtle"><i class="bi bi-exclamation-circle"></i></span>
                     </div>
-                    <div class="stat-number text-dark">{{ total_habis }}</div>
+                    <div class="stat-number text-dark" id="matchedOutOfStock">0</div>
                     <div class="small text-secondary mt-2">{{ t.out_desc }}</div>
+                </div>
+            </div>
+            <div class="col-sm-6 col-xl-3">
+                <div class="card-clean stat-card p-4 h-100 text-secondary">
+                    <div class="d-flex justify-content-between align-items-start mb-4">
+                        <span class="stat-label">{{ t.unknown_stock }}</span>
+                        <span class="stat-icon bg-secondary-subtle"><i class="bi bi-question-circle"></i></span>
+                    </div>
+                    <div class="stat-number text-dark" id="matchedUnknown">0</div>
+                    <div class="small text-secondary mt-2">{{ t.unknown_desc }}</div>
                 </div>
             </div>
         </section>
@@ -199,6 +210,7 @@
                         <h2 class="section-title mb-0">{{ t.add_target }}</h2>
                     </div>
                     <p class="text-secondary small mb-3">{{ t.add_help }}</p>
+                    <p class="text-secondary small mb-3">{{ allowed_hosts|join(', ') }}</p>
                     <form action="{{ url_for('dashboard') }}" method="POST">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <label for="urlProduk" class="form-label small fw-semibold">{{ t.url_label }}</label>
@@ -257,6 +269,7 @@
                                 <option value="">{{ t.all_status }}</option>
                                 <option value="TERSEDIA">{{ t.available }}</option>
                                 <option value="HABIS">{{ t.out_of_stock }}</option>
+                                <option value="TIDAK DIKETAHUI">{{ t.unknown_stock }}</option>
                             </select>
                             <select id="priceSort" class="form-select form-select-sm" aria-label="{{ t.sort_price }}" style="min-width: 165px;">
                                 <option value="asc">{{ t.cheapest_first }}</option>
@@ -264,7 +277,8 @@
                             </select>
                         </div>
                     </div>
-                    <div class="px-4 py-3 border-bottom">
+                    <div class="px-4 pt-2 small text-secondary">{{ t.search_scope }}</div>
+                    <div id="priceChartPanel" class="px-4 py-3 border-bottom">
                         <div class="d-flex justify-content-between align-items-center mb-3">
                             <div>
                                 <div class="fw-semibold small">{{ t.cheapest_chart_title }}</div>
@@ -275,7 +289,7 @@
                         <div id="priceChart" class="price-chart"></div>
                         <div id="priceChartEmpty" class="chart-empty small d-none">{{ t.no_price_data }}</div>
                     </div>
-                    <div class="table-responsive" style="max-height: 620px;">
+                    <div id="productTableWrap" class="table-responsive" style="max-height: 620px;">
                         <table class="table table-hover mb-0" id="produkTable">
                             <thead>
                                 <tr><th>{{ t.number }}</th><th>{{ t.product }}</th><th>{{ t.store }}</th><th>{{ t.price }}</th><th>{{ t.stock_status }}</th><th>{{ t.last_checked }}</th></tr>
@@ -295,6 +309,8 @@
                                             <span class="stock-pill stock-ready"><i class="bi bi-check-circle-fill"></i>{{ t.available }}</span>
                                         {% elif p.status_stok == 'HABIS' %}
                                             <span class="stock-pill stock-empty"><i class="bi bi-x-circle-fill"></i>{{ t.out_of_stock }}</span>
+                                        {% elif p.status_stok == 'TIDAK DIKETAHUI' %}
+                                            <span class="stock-pill stock-other"><i class="bi bi-question-circle"></i>{{ t.unknown_stock }}</span>
                                         {% else %}
                                             <span class="stock-pill stock-other">{{ p.status_stok }}</span>
                                         {% endif %}
@@ -323,12 +339,16 @@
                     <thead><tr><th>{{ t.product }}</th><th>{{ t.best_price }}</th><th>{{ t.other_offers }}</th><th>{{ t.savings }}</th></tr></thead>
                     <tbody>
                         {% for comparison in comparison_groups %}
-                        <tr>
+                        <tr data-comparison-name="{{ comparison.name|lower }}">
                             <td class="product-name">{{ comparison.name }}</td>
-                            <td class="text-nowrap"><strong class="text-success">{{ comparison.best.price|idr }}</strong><div class="small text-secondary">{{ comparison.best.store }}</div></td>
+                            <td class="text-nowrap">
+                                <strong class="{% if comparison.best.status == 'TERSEDIA' %}text-success{% else %}text-dark{% endif %}">{{ comparison.best.price|idr }}</strong>
+                                <div class="small text-secondary">{{ comparison.best.store }}</div>
+                                {% if comparison.best.status == 'HABIS' %}<span class="badge text-bg-light">{{ t.out_of_stock }}</span>{% elif comparison.best.status == 'TIDAK DIKETAHUI' %}<span class="badge text-bg-light">{{ t.unknown_stock }}</span>{% endif %}
+                            </td>
                             <td><div class="comparison-offers">
                                 {% for offer in comparison.offers %}
-                                <div class="comparison-offer"><span>{{ offer.store }}</span><span class="text-nowrap">{{ offer.price|idr }}{% if offer.status == 'HABIS' %}<span class="badge text-bg-light ms-1">{{ t.out_of_stock }}</span>{% endif %}</span></div>
+                                <div class="comparison-offer"><span>{{ offer.store }}</span><span class="text-nowrap">{{ offer.price|idr }}{% if offer.status == 'HABIS' %}<span class="badge text-bg-light ms-1">{{ t.out_of_stock }}</span>{% elif offer.status == 'TIDAK DIKETAHUI' %}<span class="badge text-bg-light ms-1">{{ t.unknown_stock }}</span>{% endif %}</span></div>
                                 {% endfor %}
                             </div></td>
                             <td class="text-nowrap">{{ comparison.difference|idr }}</td>
@@ -346,7 +366,7 @@
             <div class="p-4 border-bottom d-flex justify-content-between align-items-center gap-3">
                 <div>
                     <h2 class="section-title mb-1">{{ t.notifications_title }}</h2>
-                    <div class="small text-secondary">{{ unread_notifications }} {{ t.unread }}</div>
+                    <div class="small text-secondary"><span id="filteredUnreadCount">0</span> {{ t.unread }}</div>
                 </div>
                 {% if unread_notifications %}
                 <form action="{{ url_for('tandai_notifikasi_dibaca') }}" method="POST" class="m-0">
@@ -358,7 +378,7 @@
             {% if notifications %}
             <div>
                 {% for notification in notifications %}
-                <div class="notification-item d-flex gap-3 p-3 {% if not notification.sudah_dibaca %}unread{% endif %}">
+                <div class="notification-item d-flex gap-3 p-3 {% if not notification.sudah_dibaca %}unread{% endif %}" data-notification-name="{{ notification.nama_produk|lower }}" data-unread="{{ 'true' if not notification.sudah_dibaca else 'false' }}">
                     {% if not notification.sudah_dibaca %}<span class="notification-dot"></span>{% else %}<span class="notification-dot opacity-0"></span>{% endif %}
                     <div class="flex-grow-1 min-w-0">
                         <div class="d-flex flex-wrap justify-content-between gap-2">
@@ -368,7 +388,7 @@
                         <div class="small text-secondary mt-1">{{ notification.toko }} · {% if notification.jenis == 'stok' %}{{ t.stock_change }}{% else %}{{ t.price_change }}{% endif %}</div>
                         <div class="small mt-1">
                             {% if notification.jenis == 'stok' %}
-                                {% if notification.nilai_lama == 'TERSEDIA' %}{{ t.available }}{% else %}{{ t.out_of_stock }}{% endif %} → {% if notification.nilai_baru == 'TERSEDIA' %}{{ t.available }}{% else %}{{ t.out_of_stock }}{% endif %}
+                                {% if notification.nilai_lama == 'TERSEDIA' %}{{ t.available }}{% elif notification.nilai_lama == 'HABIS' %}{{ t.out_of_stock }}{% else %}{{ t.unknown_stock }}{% endif %} → {% if notification.nilai_baru == 'TERSEDIA' %}{{ t.available }}{% elif notification.nilai_baru == 'HABIS' %}{{ t.out_of_stock }}{% else %}{{ t.unknown_stock }}{% endif %}
                             {% else %}
                                 {{ notification.nilai_lama|idr }} → {{ notification.nilai_baru|idr }}
                             {% endif %}
@@ -387,6 +407,7 @@
     </div>
 
     <script>
+        function initializeDashboard() {
         const searchInput = document.getElementById('searchInput');
         const stockFilter = document.getElementById('stockFilter');
         const storeFilter = document.getElementById('storeFilter');
@@ -396,11 +417,19 @@
         const priceChart = document.getElementById('priceChart');
         const priceChartEmpty = document.getElementById('priceChartEmpty');
         const chartCount = document.getElementById('chartCount');
+        const overview = document.getElementById('overview');
+        const priceChartPanel = document.getElementById('priceChartPanel');
+        const productTableWrap = document.getElementById('productTableWrap');
+        const comparisonSection = document.getElementById('price-comparison');
+        const comparisonRows = Array.from(document.querySelectorAll('[data-comparison-name]'));
+        const notificationsSection = document.getElementById('notifications');
+        const notificationItems = Array.from(document.querySelectorAll('[data-notification-name]'));
         const chartProductsLabel = {{ t.chart_products|tojson }};
         const money = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 });
 
         function filterProducts() {
             const query = searchInput.value.trim().toLocaleLowerCase();
+            const hasQuery = query.length > 0;
             const status = stockFilter.value;
             const store = storeFilter.value;
             const direction = priceSort.value === 'asc' ? 1 : -1;
@@ -415,13 +444,39 @@
             const visible = [];
             rows.forEach((row) => {
                 const name = row.querySelector('.nama-item').textContent.toLocaleLowerCase();
-                const matches = name.includes(query)
+                const matches = (!hasQuery || name.includes(query))
                     && (!status || row.dataset.status === status)
                     && (!store || row.dataset.store === store);
                 row.classList.toggle('d-none', !matches);
                 if (matches) visible.push(row);
             });
             noResults.classList.toggle('d-none', visible.length > 0 || rows.length === 0);
+            overview.classList.toggle('d-none', visible.length === 0);
+            document.getElementById('matchedTotal').textContent = visible.length;
+            document.getElementById('matchedAvailable').textContent = visible.filter((row) => row.dataset.status === 'TERSEDIA').length;
+            document.getElementById('matchedOutOfStock').textContent = visible.filter((row) => row.dataset.status === 'HABIS').length;
+            document.getElementById('matchedUnknown').textContent = visible.filter((row) => row.dataset.status === 'TIDAK DIKETAHUI').length;
+
+            let matchingComparisons = 0;
+            comparisonRows.forEach((row) => {
+                const matches = !hasQuery || row.dataset.comparisonName.includes(query);
+                row.classList.toggle('d-none', !matches);
+                if (matches) matchingComparisons += 1;
+            });
+            comparisonSection.classList.toggle('d-none', matchingComparisons === 0);
+
+            let matchingNotifications = 0;
+            let matchingUnread = 0;
+            notificationItems.forEach((item) => {
+                const matches = !hasQuery || item.dataset.notificationName.includes(query);
+                item.classList.toggle('d-none', !matches);
+                if (matches) {
+                    matchingNotifications += 1;
+                    if (item.dataset.unread === 'true') matchingUnread += 1;
+                }
+            });
+            document.getElementById('filteredUnreadCount').textContent = matchingUnread;
+            notificationsSection.classList.toggle('d-none', matchingNotifications === 0);
             renderPriceChart(visible);
         }
 
@@ -446,9 +501,8 @@
                 heading.className = 'small fw-bold mb-2';
                 heading.textContent = storeName;
                 section.appendChild(heading);
-                const shownRows = storeRows.slice(0, 8);
-                const maxPrice = Math.max(...shownRows.map((row) => Number(row.dataset.price)), 1);
-                shownRows.forEach((row) => {
+                const maxPrice = Math.max(...storeRows.map((row) => Number(row.dataset.price)), 1);
+                storeRows.forEach((row) => {
                     const price = Number(row.dataset.price);
                     const chartRow = document.createElement('div');
                     chartRow.className = 'chart-row';
@@ -476,6 +530,56 @@
         storeFilter.addEventListener('change', filterProducts);
         priceSort.addEventListener('change', filterProducts);
         filterProducts();
+        }
+
+        initializeDashboard();
+
+        async function refreshDashboardInBackground() {
+            const focusedElement = document.activeElement;
+            if (focusedElement && focusedElement.id !== 'searchInput'
+                    && focusedElement.closest('.dashboard-main')
+                    && focusedElement.matches('input, select, textarea, button')) {
+                return;
+            }
+
+            const currentShell = document.querySelector('.dashboard-shell');
+            if (!currentShell) return;
+
+            const filterState = {
+                search: document.getElementById('searchInput')?.value || '',
+                store: document.getElementById('storeFilter')?.value || '',
+                stock: document.getElementById('stockFilter')?.value || '',
+                sort: document.getElementById('priceSort')?.value || 'asc',
+            };
+
+            try {
+                const response = await fetch(window.location.pathname, {
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                    headers: { 'X-Dashboard-Refresh': '1' },
+                });
+                if (!response.ok || response.redirected) return;
+
+                const html = await response.text();
+                const refreshedDocument = new DOMParser().parseFromString(html, 'text/html');
+                const refreshedShell = refreshedDocument.querySelector('.dashboard-shell');
+                if (!refreshedShell) return;
+
+                refreshedShell.querySelector('#searchInput').value = filterState.search;
+                const storeSelect = refreshedShell.querySelector('#storeFilter');
+                if ([...storeSelect.options].some((option) => option.value === filterState.store)) {
+                    storeSelect.value = filterState.store;
+                }
+                refreshedShell.querySelector('#stockFilter').value = filterState.stock;
+                refreshedShell.querySelector('#priceSort').value = filterState.sort;
+                currentShell.replaceWith(refreshedShell);
+                initializeDashboard();
+            } catch (error) {
+                // A temporary network error should not interrupt dashboard use.
+            }
+        }
+
+        window.setInterval(refreshDashboardInBackground, 60000);
     </script>
 </body>
 </html>
