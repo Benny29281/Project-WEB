@@ -1,6 +1,6 @@
 # Project Web Scraping
 
-Dashboard diperbarui di latar belakang setiap 60 detik tanpa memuat ulang seluruh halaman; kata kunci dan filter yang sedang dipakai dipertahankan.
+Dashboard diperbarui di latar belakang setiap 60 detik tanpa memuat ulang seluruh halaman; kata kunci dan filter yang sedang dipakai dipertahankan. Waktu pengecekan dan notifikasi ditampilkan dalam zona WIB (`Asia/Jakarta`), dengan format `hari-bulan-tahun jam:menit WIB`.
 
 Aplikasi Flask untuk memantau stok produk dari halaman HTTPS pada domain yang memang diizinkan untuk dipantau.
 
@@ -22,18 +22,18 @@ py -m venv .venv
 py -m pip install -r requirements.txt
 $env:ADMIN_USERNAME = "admin"
 $env:ADMIN_PASSWORD = "ganti-dengan-password-kuat"
-$env:SCRAPE_ALLOWED_HOSTS = "instaxshop.co.id,www.instaxshop.co.id,jpckemang.com,www.jpckemang.com,fujishop.id,www.fujishop.id,galaxy.co.id,www.galaxy.co.id,doss.co.id,www.doss.co.id,focusnusantara.com,www.focusnusantara.com,blibli.com,www.blibli.com,plazakamera.com,www.plazakamera.com,tokopedia.com,www.tokopedia.com,taskamera.id,www.taskamera.id,shop.anekafoto.com,camera.co.id,www.camera.co.id,hopmarket.id,www.hopmarket.id,winstore.co.id,www.winstore.co.id,sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id"
+$env:SCRAPE_ALLOWED_HOSTS = "instaxshop.co.id,www.instaxshop.co.id,jpckemang.com,www.jpckemang.com,fujishop.id,www.fujishop.id,galaxy.co.id,www.galaxy.co.id,doss.co.id,www.doss.co.id,focusnusantara.com,www.focusnusantara.com,blibli.com,www.blibli.com,plazakamera.com,www.plazakamera.com,tokopedia.com,www.tokopedia.com,taskamera.id,www.taskamera.id,shop.anekafoto.com,camera.co.id,www.camera.co.id,hopmarket.id,www.hopmarket.id,winstore.co.id,www.winstore.co.id,sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id,sentradigital.com,www.sentradigital.com,enterkomputer.com,www.enterkomputer.com"
 py app.py
 ```
 
 Saat pertama dijalankan, aplikasi membuat tabel dan akun admin dari `ADMIN_USERNAME` serta `ADMIN_PASSWORD`. Akun bawaan dengan password tetap tidak dibuat. Jika `SECRET_KEY` kosong, aplikasi membuat kunci sesi lokal di `instance/.session_secret` agar sesi login tetap konsisten setelah server direstart; folder `instance/` diabaikan Git. Jika mengatur `SECRET_KEY` sendiri di `.env` atau environment, gunakan nilai yang sama setiap kali aplikasi dijalankan. SQLite digunakan secara default; untuk MySQL, atur `DATABASE_URL`, misalnya `mysql+pymysql://user:password@localhost/project_web`.
 
-Atur `SCRAPE_ALLOWED_HOSTS` sebagai daftar domain dipisahkan koma. Default mengizinkan Instaxshop, JPC Kemang, Fujishop, Galaxy, DOSS, Focus Nusantara, Blibli, Plaza Kamera, Tokopedia, TA Kamera, Aneka Foto (`shop.anekafoto.com`), Camera.co.id, Hop Market, Winstore, Sinar Photo, dan Borneo Digital. Hanya HTTPS dan host yang tercantum persis yang diterima. Scraper memakai User-Agent yang mengidentifikasi aplikasi, tidak mengikuti redirect, dan memberi jeda antar target. Gunakan API resmi jika tersedia dan patuhi ketentuan situs; scraper tidak mencoba melewati proteksi anti-bot.
+Atur `SCRAPE_ALLOWED_HOSTS` sebagai daftar domain dipisahkan koma. Default mengizinkan Instaxshop, JPC Kemang, Fujishop, Galaxy, DOSS, Focus Nusantara, Blibli, Plaza Kamera, Tokopedia, TA Kamera, Aneka Foto (`shop.anekafoto.com`), Camera.co.id, Hop Market, Winstore, Sinar Photo, Borneo Digital, Sentra Digital, dan Enter Komputer. Hanya HTTPS dan host yang tercantum persis yang diterima. Scraper memakai User-Agent yang mengidentifikasi aplikasi, tidak mengikuti redirect, dan memberi jeda antar target. Gunakan API resmi jika tersedia dan patuhi ketentuan situs; scraper tidak mencoba melewati proteksi anti-bot.
 
 ## Notifikasi stok melalui email
 
 1. Dari folder `Project-Web-Scraping`, salin `.env.example` ke `.env`: gunakan `Copy-Item .env.example .env` di PowerShell atau `cp .env.example .env` di Git Bash.
-2. Isi `MAIL_USERNAME` dengan akun pengirim, `MAIL_PASSWORD` dengan kata sandi SMTP, `MAIL_DEFAULT_SENDER` dengan alamat pengirim, dan `STOCK_ALERT_EMAIL` dengan alamat penerima. Untuk Gmail, App Password memerlukan Verifikasi 2 Langkah dan tidak tersedia untuk semua jenis akun. Gunakan App Password di `MAIL_PASSWORD`, bukan kata sandi login biasa; Google menyarankan metode masuk yang lebih aman bila tersedia.
+2. Isi `MAIL_USERNAME` dengan satu akun pengirim, `MAIL_PASSWORD` dengan kredensial SMTP akun pengirim itu, `MAIL_DEFAULT_SENDER` dengan alamat pengirim, dan `STOCK_ALERT_EMAILS` dengan daftar penerima dipisahkan koma. Contoh lima penerima: `STOCK_ALERT_EMAILS=orang1@example.com,orang2@example.com,orang3@example.com,orang4@example.com,orang5@example.com`. Pemisah titik koma juga didukung. Kelima orang menerima notifikasi yang sama; alamat penerima disembunyikan dari satu sama lain. Penerima tidak perlu memasukkan password atau menghubungkan akun mereka ke aplikasi. Untuk Gmail, App Password memerlukan Verifikasi 2 Langkah dan tidak tersedia untuk semua jenis akun. Gunakan App Password di `MAIL_PASSWORD`, bukan kata sandi login biasa.
 3. Contoh Gmail: `MAIL_SERVER=smtp.gmail.com`, `MAIL_PORT=587`, `MAIL_USE_TLS=1`, `MAIL_USE_SSL=0`. Sesuaikan server dan pengaturan TLS/SSL jika memakai penyedia email lain.
 4. Pasang dependensi (`py -m pip install -r requirements.txt`) dan jalankan ulang aplikasi (`py app.py`). Kredensial tetap lokal di `.env`, yang diabaikan Git; jangan membagikannya atau mengunggahnya ke GitHub.
 
@@ -44,3 +44,5 @@ Untuk memantau banyak produk, tambahkan URL kategori/koleksi toko, bukan hanya h
 Untuk deployment HTTPS, set `$env:COOKIE_SECURE = "1"`. `SECRET_KEY`, password admin, dan database URL jangan dimasukkan ke source control.
 
 Scheduler otomatis aktif saat aplikasi dijalankan dengan `py app.py`. Jalankan hanya satu instance aplikasi dengan scheduler ini; untuk deployment multi-worker, pindahkan scheduler ke proses terpisah agar tugas tidak berjalan ganda. Server bawaan Flask hanya untuk pengembangan lokal.
+
+<!-- aktivkan venv: source .venv/Scripts/activate -->

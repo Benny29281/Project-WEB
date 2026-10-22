@@ -315,7 +315,7 @@
                                             <span class="stock-pill stock-other">{{ p.status_stok }}</span>
                                         {% endif %}
                                     </td>
-                                    <td class="text-secondary small text-nowrap">{{ p.terakhir_dicek }}</td>
+                                    <td class="text-secondary small text-nowrap">{{ p.terakhir_dicek|jakarta }}</td>
                                 </tr>
                                 {% else %}
                                 <tr><td colspan="6"><div class="empty-state"><i class="bi bi-box-seam fs-2 d-block mb-2"></i><strong class="d-block text-dark mb-1">{{ t.no_products }}</strong>{{ t.add_then_check }}</div></td></tr>
@@ -383,7 +383,7 @@
                     <div class="flex-grow-1 min-w-0">
                         <div class="d-flex flex-wrap justify-content-between gap-2">
                             <strong class="small">{{ notification.nama_produk }}</strong>
-                            <time class="small text-secondary">{{ notification.dibuat_pada.strftime('%Y-%m-%d %H:%M') }}</time>
+                            <time class="small text-secondary">{{ notification.dibuat_pada|jakarta }}</time>
                         </div>
                         <div class="small text-secondary mt-1">{{ notification.toko }} · {% if notification.jenis == 'stok' %}{{ t.stock_change }}{% else %}{{ t.price_change }}{% endif %}</div>
                         <div class="small mt-1">

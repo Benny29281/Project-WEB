@@ -8,10 +8,11 @@ import ssl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -25,6 +26,7 @@ from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
+JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
 
 
 def get_session_secret():
@@ -76,7 +78,8 @@ DEFAULT_ALLOWED_HOSTS = (
     "tokopedia.com,www.tokopedia.com,taskamera.id,www.taskamera.id,"
     "shop.anekafoto.com,camera.co.id,www.camera.co.id,"
     "hopmarket.id,www.hopmarket.id,winstore.co.id,www.winstore.co.id,"
-    "sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id"
+    "sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id,"
+    "sentradigital.com,www.sentradigital.com,enterkomputer.com,www.enterkomputer.com"
 )
 ALLOWED_HOSTS = {
     host.strip().lower().rstrip(".")
@@ -97,6 +100,7 @@ MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "").strip()
 MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "")
 MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER", "").strip()
 STOCK_ALERT_EMAIL = os.environ.get("STOCK_ALERT_EMAIL", "").strip()
+STOCK_ALERT_EMAILS = os.environ.get("STOCK_ALERT_EMAILS", "").strip()
 MAIL_USE_TLS = os.environ.get("MAIL_USE_TLS", "1") == "1"
 MAIL_USE_SSL = os.environ.get("MAIL_USE_SSL", "0") == "1"
 
@@ -307,7 +311,23 @@ def format_idr(value):
     return "Rp " + f"{float(value):,.0f}".replace(",", ".")
 
 
+def format_jakarta(value):
+    """Render stored UTC timestamps in Indonesia western time (WIB)."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if not isinstance(value, datetime):
+        return ""
+    # Existing database timestamps are naive UTC values.
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(JAKARTA_TZ).strftime("%d-%m-%Y %H:%M WIB")
+
+
 app.jinja_env.filters["idr"] = format_idr
+app.jinja_env.filters["jakarta"] = format_jakarta
 
 
 def store_name(url):
@@ -321,8 +341,15 @@ def normalize_product_name(value):
 
 def send_stock_status_email(product_name, store, product_url, status):
     """Email a one-time alert when a monitored product changes known stock status."""
+    # Accept a comma/semicolon separated list. Keep the legacy singular setting working.
+    configured_recipients = STOCK_ALERT_EMAILS or STOCK_ALERT_EMAIL
+    recipients = list(dict.fromkeys(
+        address.strip()
+        for address in re.split(r"[,;]", configured_recipients)
+        if address.strip()
+    ))
     if not all((MAIL_SERVER, MAIL_USERNAME, MAIL_PASSWORD,
-                MAIL_DEFAULT_SENDER, STOCK_ALERT_EMAIL)):
+                MAIL_DEFAULT_SENDER)) or not recipients:
         app.logger.info("Notifikasi email dilewati karena pengaturan SMTP belum lengkap")
         return False
     try:
@@ -331,7 +358,8 @@ def send_stock_status_email(product_name, store, product_url, status):
         status_label = "tersedia" if status == "TERSEDIA" else "habis"
         email["Subject"] = f"Stok {status_label}: {safe_product_name}"
         email["From"] = MAIL_DEFAULT_SENDER
-        email["To"] = STOCK_ALERT_EMAIL
+        # Do not expose the recipient list to the other recipients.
+        email["To"] = "undisclosed-recipients:;"
         email.set_content(
             f"Status stok produk berubah menjadi: {status_label}.\n\n"
             f"Produk: {product_name}\n"
@@ -345,7 +373,7 @@ def send_stock_status_email(product_name, store, product_url, status):
                 context=ssl.create_default_context(),
             ) as smtp:
                 smtp.login(MAIL_USERNAME, MAIL_PASSWORD)
-                smtp.send_message(email)
+                smtp.send_message(email, to_addrs=recipients)
         else:
             with smtplib.SMTP(MAIL_SERVER, port, timeout=15) as smtp:
                 smtp.ehlo()
@@ -353,7 +381,7 @@ def send_stock_status_email(product_name, store, product_url, status):
                     smtp.starttls(context=ssl.create_default_context())
                     smtp.ehlo()
                 smtp.login(MAIL_USERNAME, MAIL_PASSWORD)
-                smtp.send_message(email)
+                smtp.send_message(email, to_addrs=recipients)
         app.logger.info("Notifikasi perubahan stok email berhasil dikirim")
         return True
     except (OSError, smtplib.SMTPException, ValueError):
