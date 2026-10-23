@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urljoin, urlsplit
 from zoneinfo import ZoneInfo
@@ -18,7 +19,8 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
+from flask import (Flask, abort, flash, jsonify, redirect, render_template,
+                   request, session, url_for)
 from flask_login import (LoginManager, UserMixin, current_user, login_required,
                          login_user, logout_user)
 from flask_sqlalchemy import SQLAlchemy
@@ -75,7 +77,7 @@ DEFAULT_ALLOWED_HOSTS = (
     "fujishop.id,www.fujishop.id,galaxy.co.id,www.galaxy.co.id,"
     "doss.co.id,www.doss.co.id,focusnusantara.com,www.focusnusantara.com,"
     "blibli.com,www.blibli.com,plazakamera.com,www.plazakamera.com,"
-    "tokopedia.com,www.tokopedia.com,taskamera.id,www.taskamera.id,"
+    "tokopedia.com,www.tokopedia.com,shopee.co.id,www.shopee.co.id,taskamera.id,www.taskamera.id,"
     "shop.anekafoto.com,camera.co.id,www.camera.co.id,"
     "hopmarket.id,www.hopmarket.id,winstore.co.id,www.winstore.co.id,"
     "sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id,"
@@ -265,6 +267,82 @@ TEXT["ko"].update({
     "search_prompt": "\ud0a4\uc6cc\ub4dc\ub97c \uc785\ub825\ud558\uba74 \uc77c\uce58\ud558\ub294 \uc0c1\ud488\uacfc \ubaa8\ub2c8\ud130\ub9c1 \ub370\uc774\ud130\uac00 \ud45c\uc2dc\ub429\ub2c8\ub2e4.",
 })
 
+TEXT["id"].update({
+    "nav_assistant": "Tanya katalog", "chat_error": "Maaf, pencarian katalog gagal. Coba lagi sebentar.",
+    "chat_price_missing": "Harga belum terbaca",
+    "chat_title": "Tanya katalog stok", "chat_help": "Tanyakan produk; jawaban diambil dari data yang sudah tersimpan.",
+    "chat_placeholder": "Contoh: Ada Instax Mini 12 yang tersedia?", "chat_send": "Kirim",
+    "chat_welcome": "Halo! Tanyakan nama produk yang ingin kamu cek. Saya mencari di katalog toko yang sudah dipantau.",
+    "chat_scope": "Jawaban berdasarkan hasil pengecekan terakhir, bukan pencarian seluruh internet.",
+    "chat_empty": "Tulis nama atau kata kunci produk yang ingin dicari.",
+    "chat_not_found": "Saya belum menemukan produk yang cocok di katalog yang tersimpan. Pastikan URL tokonya sudah dipantau dan pengecekan sudah berjalan.",
+    "chat_found": "Saya menemukan {count} produk yang cocok di katalog pantauan:",
+})
+TEXT["en"].update({
+    "nav_assistant": "Ask catalog", "chat_error": "Sorry, the catalog search failed. Please try again.",
+    "chat_price_missing": "Price unavailable",
+    "chat_title": "Ask the stock catalog", "chat_help": "Ask about a product; answers come from saved monitoring data.",
+    "chat_placeholder": "Example: Is Instax Mini 12 in stock?", "chat_send": "Send",
+    "chat_welcome": "Hi! Ask for a product name. I’ll search the catalog from stores you monitor.",
+    "chat_scope": "Answers use the latest saved checks, not a search of the whole internet.",
+    "chat_empty": "Enter a product name or keyword to search.",
+    "chat_not_found": "I couldn’t find a matching product in the saved catalog. Make sure its store URL is monitored and has been checked.",
+    "chat_found": "I found {count} matching products in your monitored catalog:",
+})
+TEXT["zh"].update({
+    "nav_assistant": "è¯¢é—®ç›®å½•", "chat_error": "ç›®å½•æœç´¢å¤±è´¥ï¼Œè¯·ç¨åŽé‡è¯•ã€‚",
+    "chat_price_missing": "æš‚æ— ä»·æ ¼",
+    "chat_title": "询问库存目录", "chat_help": "询问商品；回答来自已保存的监控数据。",
+    "chat_placeholder": "例如：Instax Mini 12 有现货吗？", "chat_send": "发送",
+    "chat_welcome": "你好！请输入商品名称，我会在已监控店铺的目录中查找。",
+    "chat_scope": "回答基于最近保存的检查结果，不会搜索整个互联网。",
+    "chat_empty": "请输入商品名称或关键词。",
+    "chat_not_found": "已保存的目录中没有找到匹配商品。请确认店铺 URL 已加入监控并完成检查。",
+    "chat_found": "在监控目录中找到 {count} 个匹配商品：",
+})
+TEXT["ko"].update({
+    "nav_assistant": "ì¹´íƒˆë¡œê·¸ ì§ˆë¬¸", "chat_error": "ì¹´íƒˆë¡œê·¸ ê²€ìƒ‰ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤. ìž ì‹œ í›„ ë‹¤ì‹œ ì‹œë„„í•˜ì„¸ìš”.",
+    "chat_price_missing": "ê°€ê²© ì •ë³´ ì—†ìŒ",
+    "chat_title": "재고 카탈로그에 질문하기", "chat_help": "상품을 물어보세요. 저장된 모니터링 데이터로 답합니다.",
+    "chat_placeholder": "예: Instax Mini 12 재고 있나요?", "chat_send": "보내기",
+    "chat_welcome": "안녕하세요! 상품명을 입력하면 모니터링 중인 매장 카탈로그에서 찾습니다.",
+    "chat_scope": "답변은 최근 저장된 확인 결과를 기준으로 하며 전체 인터넷 검색은 아닙니다.",
+    "chat_empty": "검색할 상품명이나 키워드를 입력하세요.",
+    "chat_not_found": "저장된 카탈로그에서 일치하는 상품을 찾지 못했습니다. 매장 URL을 추가하고 확인을 실행했는지 확인하세요.",
+    "chat_found": "모니터링 카탈로그에서 일치하는 상품 {count}개를 찾았습니다:",
+})
+
+TEXT["id"].update({
+    "chat_category_label": "Kategori pertanyaan", "chat_category_all": "Semua informasi",
+    "chat_category_available": "Stok tersedia", "chat_category_out": "Stok habis",
+    "chat_category_cheapest": "Harga termurah", "chat_filtered_none": "Belum ada produk cocok dengan kategori ini.",
+})
+TEXT["en"].update({
+    "chat_category_label": "Question category", "chat_category_all": "All information",
+    "chat_category_available": "In stock", "chat_category_out": "Out of stock",
+    "chat_category_cheapest": "Lowest price", "chat_filtered_none": "No matching products fit this category.",
+})
+TEXT["zh"].update({
+    "chat_category_label": "问题类别", "chat_category_all": "所有信息",
+    "chat_category_available": "有库存", "chat_category_out": "无库存",
+    "chat_category_cheapest": "最低价格", "chat_filtered_none": "没有符合此类别的匹配商品。",
+})
+TEXT["ko"].update({
+    "chat_category_label": "질문 카테고리", "chat_category_all": "모든 정보",
+    "chat_category_available": "재고 있음", "chat_category_out": "품절",
+    "chat_category_cheapest": "최저 가격", "chat_filtered_none": "이 카테고리에 해당하는 상품이 없습니다.",
+})
+
+TEXT["id"].update({"chat_minimize": "Tutup chat"})
+TEXT["en"].update({"chat_minimize": "Minimize chat"})
+TEXT["zh"].update({"chat_minimize": "收起聊天"})
+TEXT["ko"].update({"chat_minimize": "채팅 최소화"})
+
+TEXT["id"].update({"variant": "Varian", "units": "unit"})
+TEXT["en"].update({"variant": "Variant", "units": "units"})
+TEXT["zh"].update({"variant": "规格", "units": "件"})
+TEXT["ko"].update({"variant": "옵션", "units": "개"})
+
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
@@ -292,6 +370,8 @@ class ProdukDetail(db.Model):
     terakhir_dicek = db.Column(db.String(50), nullable=False)
     url_sumber = db.Column(db.String(500), nullable=False)
     harga = db.Column(db.Numeric(14, 2), nullable=True)
+    stok_kuantitas = db.Column(db.Integer, nullable=True)
+    varian_produk = db.Column(db.String(255), nullable=True)
 
 
 class Notifikasi(db.Model):
@@ -335,8 +415,71 @@ def store_name(url):
     return hostname[4:] if hostname.startswith("www.") else hostname
 
 
+def aggregate_variant_status(observations):
+    """Summarize observed variants; one captured sold-out option is insufficient."""
+    observations = list(observations)
+    if observations and isinstance(observations[0], tuple):
+        statuses = [status for status, _variant in observations]
+        variant_names = {
+            variant for _status, variant in observations if variant
+        }
+    else:
+        statuses = observations
+        variant_names = set()
+    if any(status == "TERSEDIA" for status in statuses):
+        return "TERSEDIA"
+    # Shopee pages can expose many options, but this scraper may only have
+    # captured one. Require more than one observed variant before aggregating
+    # a sold-out state for the whole product.
+    if (len(variant_names) > 1 and all(status == "HABIS" for status in statuses)):
+        return "HABIS"
+    return "TIDAK DIKETAHUI"
+
+
+def is_shopee_product_url(url):
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    return host == "shopee.co.id" and re.search(r"-i\.\d+\.\d+", parts.path) is not None
+
+
 def normalize_product_name(value):
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+SEARCH_STOPWORDS = {
+    "ada", "produk", "barang", "ini", "itu", "gak", "nggak", "enggak",
+    "tidak", "apakah", "kah", "ya", "dong", "tolong", "saya", "mau",
+    "cari", "cek", "lihat", "di", "ke", "dari", "untuk", "yang", "dan",
+    "atau", "berapa", "harga", "stok", "stock", "ready", "tersedia", "terjual",
+    "jual", "toko", "termurah", "murah", "mahal", "paling", "terbaik", "best",
+    "cheapest", "low", "cost", "available", "is", "are", "there", "any",
+    "do", "you", "have", "the", "in", "please", "check", "find", "price",
+    "of", "can", "has", "for", "i", "www", "com", "co", "id",
+}
+SEARCH_SYNONYMS = {
+    "camera": {"camera", "kamera"}, "kamera": {"kamera", "camera"},
+    "instant": {"instant", "instan"}, "instan": {"instan", "instant"},
+}
+
+
+def search_keywords(value):
+    """Normalize a natural-language question into meaningful catalog keywords."""
+    tokens = normalize_product_name(value).split()
+    return [token for token in tokens if token not in SEARCH_STOPWORDS and len(token) > 1]
+
+
+def keyword_matches(term, product_tokens):
+    aliases = SEARCH_SYNONYMS.get(term, {term})
+    if aliases.intersection(product_tokens):
+        return True
+    # Keep model numbers exact; use a small typo tolerance for alphabetic words only.
+    if not term.isalpha() or len(term) < 5:
+        return False
+    return any(
+        candidate.isalpha() and len(candidate) >= 5
+        and SequenceMatcher(None, term, candidate).ratio() >= 0.84
+        for candidate in product_tokens
+    )
 
 
 def send_stock_status_email(product_name, store, product_url, status):
@@ -754,9 +897,241 @@ def _next_catalog_page(soup, current_url, original_host):
     return None
 
 
+def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hosts):
+    """Render one public marketplace product page without bypassing access controls."""
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        app.logger.warning(
+            "Playwright belum terpasang; instal dependensi dan browser Chromium untuk memantau %s",
+            marketplace,
+        )
+        return None
+
+    browser = None
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(locale="id-ID")
+            def allow_page_request(route):
+                request_parts = urlsplit(route.request.url)
+                request_host = (request_parts.hostname or "").lower().rstrip(".")
+                if (route.request.is_navigation_request()
+                        and (request_parts.scheme != "https"
+                             or request_host not in marketplace_hosts)):
+                    route.abort()
+                elif route.request.resource_type in {"image", "media", "font"}:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            # Product images and decorative fonts are not needed for stock checks.
+            page.route("**/*", allow_page_request)
+            response = page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+            if response is None or response.status >= 400:
+                app.logger.info("Halaman produk %s tidak memberi respons yang bisa dibaca", marketplace)
+                browser.close()
+                return None
+            final_url = page.url
+            final_parts = urlsplit(final_url)
+            original_host = (urlsplit(target_url).hostname or "").lower().rstrip(".")
+            if (not validate_target_url(final_url)
+                    or (final_parts.hostname or "").lower().rstrip(".") not in marketplace_hosts):
+                app.logger.warning("Navigasi %s dialihkan ke host lain; pengecekan dihentikan", marketplace)
+                browser.close()
+                return None
+
+            try:
+                page.locator("body").wait_for(state="visible", timeout=5000)
+                # Give the selected variant's public product details time to render.
+                page.wait_for_timeout(5000)
+            except PlaywrightTimeoutError:
+                pass
+            body_text = page.locator("body").inner_text(timeout=5000)
+            lowered_text = body_text.casefold()
+            purchase_actions = page.locator("button,[role='button']").evaluate_all(
+                "elements => elements.map(element => ({"
+                "text: (element.innerText || element.textContent || '').trim(),"
+                "disabled: element.disabled || element.getAttribute('aria-disabled') === 'true'"
+                "}))"
+            )
+            selected_variant_labels = page.locator("button,[role='radio'],[role='option']").evaluate_all(
+                "elements => elements.filter(element => {"
+                "const state = (element.className || '').toString();"
+                "return element.getAttribute('aria-pressed') === 'true' || "
+                "element.getAttribute('aria-selected') === 'true' || "
+                "/selected|checked/i.test(state);"
+                "}).map(element => (element.innerText || element.textContent || '').trim())"
+                ".filter(text => text && text.length <= 60)"
+            )
+            challenge_markers = (
+                "captcha", "verify you are human", "i'm not a robot",
+                "aktivitas tidak biasa", "verifikasi bahwa anda manusia",
+                "access denied", "akses ditolak",
+            )
+            if any(marker in lowered_text for marker in challenge_markers):
+                app.logger.warning(
+                    "%s meminta verifikasi atau menolak akses; pengecekan dihentikan", marketplace
+                )
+                browser.close()
+                return None
+
+            soup = BeautifulSoup(page.content(), "html.parser")
+            browser.close()
+    except Exception as error:
+        # Playwright can fail when Chromium is not installed or the site is unavailable.
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        app.logger.info("Pengecekan Playwright %s gagal: %s", marketplace, type(error).__name__)
+        return None
+
+    schema_products = _schema_products(soup)
+    title_tag = soup.select_one("meta[property='og:title'], meta[name='title']")
+    heading = soup.select_one("h1")
+    page_title = ((title_tag.get("content", "") if title_tag else "")
+                  or (heading.get_text(" ", strip=True) if heading else "")
+                  or (soup.title.get_text(" ", strip=True) if soup.title else "")
+                  or (schema_products[0]["name"] if len(schema_products) == 1 else ""))
+    page_title = re.sub(
+        r"\s*[|–-]\s*(?:Shopee Indonesia|Blibli(?:\.com)?)\s*$", "", page_title,
+        flags=re.IGNORECASE,
+    ).strip()
+    path_parts = [part for part in urlsplit(target_url).path.split("/") if part]
+    slug = path_parts[1] if marketplace == "Blibli" and len(path_parts) > 1 else (
+        path_parts[0] if path_parts else ""
+    )
+    if marketplace == "Shopee":
+        slug = re.sub(r"-i\.\d+\.\d+$", "", slug)
+    elif marketplace == "Blibli":
+        slug = re.sub(r"/ps--.*$", "", slug, flags=re.IGNORECASE)
+    slug_title = re.sub(r"[-_]+", " ", slug).strip()
+    is_store_heading = any(
+        marker in page_title.casefold()
+        for marker in ("toko online", "official store", "officialstore")
+    )
+    title = slug_title if is_store_heading and slug_title else page_title or slug_title
+    if not title or any(site in title.casefold() for site in ("shopee indonesia", "blibli.com")):
+        app.logger.info("Nama produk %s tidak ditemukan pada halaman yang dirender", marketplace)
+        return None
+    normalized_title = normalize_product_name(title)
+    schema_product = next(
+        (item for item in schema_products
+         if normalize_product_name(item["name"]) == normalized_title),
+        schema_products[0] if len(schema_products) == 1 else None,
+    )
+
+    price_tag = soup.select_one(
+        "meta[property='product:price:amount'], meta[property='og:price:amount'], "
+        "meta[itemprop='price'], [itemprop='price'][content]"
+    )
+    price = parse_price(price_tag.get("content")) if price_tag else None
+    if price is None:
+        # Marketplaces may render the product price in the page rather than
+        # exposing Product/Offer metadata.
+        for price_node in soup.select(
+            '[data-sqe="price"], [data-testid*="price"], '
+            '.product-briefing [class*="price"], main [class*="price"]'
+        ):
+            price_match = re.search(
+                r"Rp\.?\s*[\d.,]+", price_node.get_text(" ", strip=True),
+                flags=re.IGNORECASE,
+            )
+            if price_match:
+                price = parse_price(price_match.group(0))
+                if price is not None:
+                    break
+    if price is None:
+        # Product detail price is normally the first currency amount in the rendered page.
+        price_match = re.search(r"Rp\.?\s*[\d.,]+", body_text, flags=re.IGNORECASE)
+        if price_match:
+            price = parse_price(price_match.group(0))
+    if price is None and schema_product:
+        price = schema_product["price"]
+
+    quantity_match = re.search(
+        r"\bkuantitas\b[\s\S]{0,250}?\btersedia\s+([\d.,]+)",
+        lowered_text,
+        flags=re.IGNORECASE,
+    ) or re.search(
+        r"\btersedia\s+([1-9][\d.,]*)\b", lowered_text, flags=re.IGNORECASE,
+    ) or re.search(r"\bstok\s*[:=]\s*([\d.,]+)", lowered_text, flags=re.IGNORECASE)
+    stock_quantity = None
+    if quantity_match:
+        quantity_digits = re.sub(r"\D", "", quantity_match.group(1))
+        if quantity_digits:
+            stock_quantity = int(quantity_digits)
+
+    selected_variants = list(dict.fromkeys(
+        label for label in selected_variant_labels
+        if not any(word in label.casefold() for word in ("beli", "keranjang", "toko", "chat"))
+    ))
+    variant_label = ", ".join(selected_variants)[:255] or None
+    # Do not show Shopee's internal display_model_id as a user-facing variant.
+    # It is an opaque identifier, not a variant name, and this scraper currently
+    # checks only the option selected when the product page loads.
+
+    stock_status = "TIDAK DIKETAHUI"
+    if stock_quantity == 0 or re.search(
+        r"\bstok\s*:\s*0\b|\bstok\s+(?:habis|kosong)\b|"
+        r"\bproduk ini (?:sudah|telah) habis\b|\bhabis terjual\b|\bsold out\b",
+        lowered_text,
+    ):
+        stock_status = "HABIS"
+    elif (stock_quantity is not None and stock_quantity > 0) or (
+        re.search(
+            r"\bstok\s*:\s*[1-9]\d*\b|\bstok\s+tersedia\b|"
+            r"\btersedia\s+[1-9]\d*\b|\btersisa\s+[1-9]\d*\b",
+            lowered_text,
+        )
+        or any(
+            not action["disabled"] and re.search(
+                r"beli sekarang|masukkan ke keranjang|tambah ke keranjang|buy now|add to cart",
+                action["text"], re.IGNORECASE,
+            )
+            for action in purchase_actions
+        )
+    ):
+        stock_status = "TERSEDIA"
+    if stock_status == "TIDAK DIKETAHUI" and schema_product:
+        stock_status = schema_product["status"]
+
+    return {
+        "name": title,
+        "price": price,
+        "status": stock_status,
+        "stock_quantity": stock_quantity,
+        "variant": variant_label,
+        "product_url": final_url,
+    }
+
+
 def fetch_catalog_products(target_url, headers):
     """Read a listing page and its explicit pagination links, with a hard cap."""
     original_host = (urlsplit(target_url).hostname or "").lower().rstrip(".")
+    if original_host in {"shopee.co.id", "www.shopee.co.id"}:
+        product = _fetch_rendered_marketplace_product(
+            target_url, "Shopee", {"shopee.co.id", "www.shopee.co.id"},
+        )
+        found = [product] if product else []
+        app.logger.info(
+            "Hasil target Shopee %s: %d produk ditemukan", target_url, len(found)
+        )
+        return found
+    if (original_host in {"blibli.com", "www.blibli.com"}
+            and urlsplit(target_url).path.startswith("/p/")):
+        product = _fetch_rendered_marketplace_product(
+            target_url, "Blibli", {"blibli.com", "www.blibli.com"},
+        )
+        found = [product] if product else []
+        app.logger.info(
+            "Hasil target Blibli %s: %d produk ditemukan", target_url, len(found)
+        )
+        return found
+
     current_url = target_url
     visited = set()
     products = {}
@@ -819,11 +1194,33 @@ def jalankan_pengecekan_stok():
                     stock_alerts = []
                     for product in catalog_products:
                         name = product["name"]
+                        variant = product.get("variant")
+                        shopee_product = is_shopee_product_url(kategori.url)
+                        prior_variant_status = aggregate_variant_status(
+                            (item.status_stok, item.varian_produk)
+                            for item in ProdukDetail.query.filter_by(
+                                url_sumber=kategori.url
+                            ).all()
+                        ) if shopee_product else None
                         row = ProdukDetail.query.filter_by(
-                            nama_produk=name, url_sumber=kategori.url
+                            nama_produk=name, url_sumber=kategori.url,
+                            varian_produk=variant,
                         ).first()
+                        if row is None and variant is None:
+                            # Reuse the pre-variant row rather than creating a
+                            # duplicate after dropping the old opaque model ID.
+                            row = ProdukDetail.query.filter_by(
+                                nama_produk=name, url_sumber=kategori.url
+                            ).first()
                         if row:
-                            if (product["status"] in {"TERSEDIA", "HABIS"}
+                            effective_status = product["status"]
+                            # A failed read is not evidence that a previously
+                            # confirmed product went out of stock.
+                            if (effective_status == "TIDAK DIKETAHUI"
+                                    and row.status_stok in {"TERSEDIA", "HABIS"}):
+                                effective_status = row.status_stok
+                            if (not shopee_product
+                                    and product["status"] in {"TERSEDIA", "HABIS"}
                                     and row.status_stok != product["status"]
                                     and (product["status"] == "TERSEDIA"
                                          or row.status_stok == "TERSEDIA")):
@@ -833,7 +1230,8 @@ def jalankan_pengecekan_stok():
                                     product.get("product_url") or kategori.url,
                                     product["status"],
                                 ))
-                            if (row.status_stok in {"TERSEDIA", "HABIS"}
+                            if (not shopee_product
+                                    and row.status_stok in {"TERSEDIA", "HABIS"}
                                     and product["status"] in {"TERSEDIA", "HABIS"}
                                     and row.status_stok != product["status"]):
                                 db.session.add(Notifikasi(
@@ -845,8 +1243,11 @@ def jalankan_pengecekan_stok():
                                     nama_produk=name, toko=store_name(kategori.url), jenis="harga",
                                     nilai_lama=str(row.harga), nilai_baru=str(product["price"]),
                                 ))
-                            row.status_stok = product["status"]
+                            row.status_stok = effective_status
                             row.terakhir_dicek = now
+                            if product.get("stock_quantity") is not None:
+                                row.stok_kuantitas = product["stock_quantity"]
+                            row.varian_produk = variant
                             if product["price"] is not None:
                                 row.harga = product["price"]
                         else:
@@ -856,7 +1257,32 @@ def jalankan_pengecekan_stok():
                                 terakhir_dicek=now,
                                 url_sumber=kategori.url,
                                 harga=product["price"],
+                                stok_kuantitas=product.get("stock_quantity"),
+                                varian_produk=variant,
                             ))
+                        if shopee_product:
+                            db.session.flush()
+                            current_variant_status = aggregate_variant_status(
+                                (item.status_stok, item.varian_produk)
+                                for item in ProdukDetail.query.filter_by(
+                                    url_sumber=kategori.url
+                                ).all()
+                            )
+                            if (prior_variant_status != current_variant_status
+                                    and current_variant_status in {"TERSEDIA", "HABIS"}):
+                                db.session.add(Notifikasi(
+                                    nama_produk=name, toko=store_name(kategori.url), jenis="stok",
+                                    nilai_lama=prior_variant_status,
+                                    nilai_baru=current_variant_status,
+                                ))
+                                if prior_variant_status in {
+                                    "TERSEDIA", "HABIS", "TIDAK DIKETAHUI"
+                                }:
+                                    stock_alerts.append((
+                                        name, store_name(kategori.url),
+                                        product.get("product_url") or kategori.url,
+                                        current_variant_status,
+                                    ))
                     db.session.commit()
                     app.logger.info("Pengecekan selesai untuk satu target")
                     for alert in stock_alerts:
@@ -933,6 +1359,86 @@ def hapus_url(id):
     return redirect(url_for("dashboard"))
 
 
+@app.route("/asisten-katalog", methods=["POST"])
+@login_required
+def asisten_katalog():
+    language = session.get("language", "id")
+    if language not in LANGUAGES:
+        language = "id"
+    labels = TEXT[language]
+    question = (request.form.get("question") or "").strip()[:200]
+    category = request.form.get("category", "all")
+    if category not in {"all", "available", "out", "cheapest"}:
+        category = "all"
+    if not question:
+        return jsonify(message=labels["chat_empty"], products=[])
+
+    query_terms = search_keywords(question)
+    if not query_terms:
+        return jsonify(message=labels["chat_empty"], products=[])
+
+    matches = []
+    products = ProdukDetail.query.order_by(ProdukDetail.terakhir_dicek.desc()).all()
+    for product in products:
+        normalized_name = normalize_product_name(product.nama_produk)
+        store_tokens = search_keywords(store_name(product.url_sumber))
+        product_tokens = set(normalized_name.split()) | set(store_tokens)
+        if not all(keyword_matches(term, product_tokens) for term in set(query_terms)):
+            continue
+        exact_count = sum(
+            bool(SEARCH_SYNONYMS.get(term, {term}).intersection(product_tokens))
+            for term in set(query_terms)
+        )
+        matches.append((
+            exact_count,
+            len(set(query_terms)),
+            product,
+        ))
+
+    matching_count = len(matches)
+    if category == "available":
+        matches = [match for match in matches if match[2].status_stok == "TERSEDIA"]
+    elif category == "out":
+        matches = [match for match in matches if match[2].status_stok == "HABIS"]
+    elif category == "cheapest":
+        matches = [match for match in matches if match[2].harga is not None]
+
+    if category == "cheapest":
+        matches.sort(key=lambda match: (
+            match[2].harga is None,
+            match[2].harga if match[2].harga is not None else Decimal("Infinity"),
+            -match[0],
+        ))
+    else:
+        matches.sort(
+            key=lambda match: (
+                match[0], match[2].terakhir_dicek or "",
+            ),
+            reverse=True,
+        )
+
+    if not matches:
+        message = labels["chat_not_found"] if matching_count == 0 else labels["chat_filtered_none"]
+        return jsonify(message=message, products=[])
+
+    found = []
+    for _, _, product in matches[:8]:
+        found.append({
+            "name": product.nama_produk,
+            "store": store_name(product.url_sumber),
+            "status": product.status_stok,
+            "price": float(product.harga) if product.harga is not None else None,
+            "stock_quantity": product.stok_kuantitas,
+            "variant": product.varian_produk,
+            "last_checked": format_jakarta(product.terakhir_dicek),
+            "source": product.url_sumber,
+        })
+    return jsonify(
+        message=labels["chat_found"].format(count=len(found)),
+        products=found,
+    )
+
+
 @app.route("/", methods=["GET", "POST"])
 @login_required
 def dashboard():
@@ -957,6 +1463,17 @@ def dashboard():
     store_for_product = {}
     for product in daftar_produk:
         store_for_product[product.id] = store_name(product.url_sumber)
+    status_for_product = {product.id: product.status_stok for product in daftar_produk}
+    shopee_variant_groups = {}
+    for product in daftar_produk:
+        if is_shopee_product_url(product.url_sumber):
+            shopee_variant_groups.setdefault(product.url_sumber, []).append(product)
+    for source_url, variants in shopee_variant_groups.items():
+        group_status = aggregate_variant_status(
+            (item.status_stok, item.varian_produk) for item in variants
+        )
+        for variant in variants:
+            status_for_product[variant.id] = group_status
     daftar_toko = sorted(set(store_for_product.values()))
     comparisons = {}
     for product in daftar_produk:
@@ -989,12 +1506,13 @@ def dashboard():
     notifications = Notifikasi.query.order_by(Notifikasi.dibuat_pada.desc()).limit(30).all()
     unread_notifications = Notifikasi.query.filter_by(sudah_dibaca=False).count()
     total_produk = len(daftar_produk)
-    total_tersedia = sum(p.status_stok == "TERSEDIA" for p in daftar_produk)
-    total_habis = sum(p.status_stok == "HABIS" for p in daftar_produk)
-    total_tidak_diketahui = sum(p.status_stok == "TIDAK DIKETAHUI" for p in daftar_produk)
+    total_tersedia = sum(status_for_product[p.id] == "TERSEDIA" for p in daftar_produk)
+    total_habis = sum(status_for_product[p.id] == "HABIS" for p in daftar_produk)
+    total_tidak_diketahui = sum(status_for_product[p.id] == "TIDAK DIKETAHUI" for p in daftar_produk)
     return render_template(
         "dashboard.html", daftar_kategori=daftar_kategori,
         daftar_produk=daftar_produk, total_produk=total_produk,
+        status_for_product=status_for_product,
         total_tersedia=total_tersedia, total_habis=total_habis,
         total_tidak_diketahui=total_tidak_diketahui,
         daftar_toko=daftar_toko, store_for_product=store_for_product,
@@ -1010,6 +1528,18 @@ def initialize_database():
         if "harga" not in product_columns:
             db.session.execute(text(
                 f"ALTER TABLE {ProdukDetail.__tablename__} ADD COLUMN harga NUMERIC(14, 2)"
+            ))
+            db.session.commit()
+            product_columns.add("harga")
+        if "stok_kuantitas" not in product_columns:
+            db.session.execute(text(
+                f"ALTER TABLE {ProdukDetail.__tablename__} ADD COLUMN stok_kuantitas INTEGER"
+            ))
+            db.session.commit()
+            product_columns.add("stok_kuantitas")
+        if "varian_produk" not in product_columns:
+            db.session.execute(text(
+                f"ALTER TABLE {ProdukDetail.__tablename__} ADD COLUMN varian_produk VARCHAR(255)"
             ))
             db.session.commit()
         username = os.environ.get("ADMIN_USERNAME")

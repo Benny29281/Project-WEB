@@ -32,6 +32,22 @@
         .notification-item:last-child { border-bottom: 0; }
         .notification-item.unread { background: #f7f9ff; }
         .notification-dot { width: 9px; height: 9px; flex: 0 0 9px; margin-top: .38rem; border-radius: 50%; background: var(--brand); }
+        .catalog-chat-widget { position: fixed; right: 22px; bottom: 22px; z-index: 1050; width: min(410px, calc(100vw - 32px)); }
+        .catalog-chat-launcher { display: flex; align-items: center; gap: .65rem; margin-left: auto; padding: .8rem 1rem; border-radius: 999px; box-shadow: 0 8px 28px rgba(35,58,120,.24); }
+        .catalog-chat-window { display: none; flex-direction: column; max-height: min(650px, calc(100vh - 100px)); overflow: hidden; border-radius: 18px; box-shadow: 0 16px 48px rgba(26,39,68,.22); }
+        .catalog-chat-widget.is-open .catalog-chat-window { display: flex; }
+        .catalog-chat-widget.is-open .catalog-chat-launcher { display: none; }
+        .catalog-chat-header { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; padding: 1rem; border-bottom: 1px solid var(--line); }
+        .catalog-chat-log { display: grid; flex: 1 1 auto; gap: .75rem; min-height: 190px; max-height: min(390px, 48vh); overflow-y: auto; padding: 1rem; background: #f8faff; }
+        .catalog-chat-line { display: flex; }
+        .catalog-chat-line.user { justify-content: flex-end; }
+        .catalog-chat-bubble { max-width: min(92%, 760px); padding: .75rem .9rem; border: 1px solid var(--line); border-radius: 14px; background: #fff; color: #344256; font-size: .88rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .catalog-chat-line.user .catalog-chat-bubble { border-color: #d9e1ff; background: #eef2ff; }
+        .catalog-chat-product { margin-top: .65rem; padding: .7rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+        .catalog-chat-form { display: flex; flex-wrap: wrap; gap: .6rem; padding: 1rem; }
+        .catalog-chat-form .form-control { min-width: 0; }
+        .catalog-chat-form .form-select { flex: 1 1 100%; }
+        .catalog-chat-form .form-control { flex: 1 1 180px; }
         body { background: var(--canvas); color: var(--ink); font-family: Inter, "Segoe UI", sans-serif; }
         .topbar { background: #fff; border-bottom: 1px solid var(--line); }
         .brand-logo { display: block; width: 165px; max-width: 100%; height: auto; }
@@ -104,6 +120,12 @@
             .chart-row { grid-template-columns: minmax(95px, 1fr) minmax(55px, 1.1fr) auto; gap: .45rem; }
             .chart-name { font-size: .72rem; }
             .chart-value { font-size: .72rem; }
+            .catalog-chat-form { flex-wrap: wrap; }
+            .catalog-chat-form .form-select { flex: 1 1 100%; }
+            .catalog-chat-form .form-control { flex: 1 1 calc(100% - 90px); }
+            .catalog-chat-widget { right: 10px; bottom: 10px; width: calc(100vw - 20px); }
+            .catalog-chat-window { max-height: calc(100vh - 28px); max-height: calc(100dvh - 28px); }
+            .catalog-chat-log { min-height: 150px; max-height: 48vh; }
         }
     </style>
 </head>
@@ -138,6 +160,7 @@
             <a class="sidebar-link" href="#stock-list"><i class="bi bi-box-seam"></i>{{ t.nav_stock }}</a>
             <a class="sidebar-link" href="#price-comparison"><i class="bi bi-bar-chart-line"></i>{{ t.nav_compare }}</a>
             <a class="sidebar-link" href="#notifications"><i class="bi bi-bell"></i>{{ t.nav_notifications }}{% if unread_notifications %}<span class="sidebar-count">{{ unread_notifications }}</span>{% endif %}</a>
+            <a class="sidebar-link" href="#catalog-chat"><i class="bi bi-chat-dots"></i>{{ t.nav_assistant }}</a>
         </nav>
         <div class="sidebar-tip small text-secondary mt-4 px-2">{{ t.brand_subtitle }}</div>
       </aside>
@@ -158,6 +181,52 @@
             </div>
           {% endif %}
         {% endwith %}
+
+        <section id="catalog-chat" class="catalog-chat-widget" aria-label="{{ t.chat_title }}"
+                 data-endpoint="{{ url_for('asisten_katalog') }}"
+                 data-chat-welcome="{{ t.chat_welcome }}" data-chat-error="{{ t.chat_error }}"
+                 data-available="{{ t.available }}" data-out-of-stock="{{ t.out_of_stock }}"
+                 data-unknown-stock="{{ t.unknown_stock }}" data-last-checked="{{ t.last_checked }}"
+                 data-source="{{ t.source }}" data-price-missing="{{ t.chat_price_missing }}"
+                 data-variant-label="{{ t.variant }}" data-unit-label="{{ t.units }}">
+            <button id="catalogChatLauncher" class="btn btn-primary catalog-chat-launcher" type="button"
+                    aria-controls="catalogChatWindow" aria-expanded="false" aria-label="{{ t.nav_assistant }}">
+                <i class="bi bi-chat-dots-fill" aria-hidden="true"></i><span>{{ t.nav_assistant }}</span>
+            </button>
+            <div id="catalogChatWindow" class="card-clean catalog-chat-window" aria-hidden="true">
+                <div class="catalog-chat-header">
+                    <div class="d-flex align-items-start gap-2">
+                        <span class="stat-icon bg-primary-subtle text-primary flex-shrink-0"><i class="bi bi-chat-dots"></i></span>
+                        <div>
+                            <h2 class="section-title mb-1">{{ t.chat_title }}</h2>
+                            <p class="small text-secondary mb-1">{{ t.chat_help }}</p>
+                            <p class="small text-secondary mb-0">{{ t.chat_scope }}</p>
+                        </div>
+                    </div>
+                    <button id="catalogChatMinimize" class="btn btn-light border btn-sm flex-shrink-0" type="button"
+                            aria-label="{{ t.chat_minimize }}" title="{{ t.chat_minimize }}">
+                        <i class="bi bi-dash-lg" aria-hidden="true"></i>
+                    </button>
+                </div>
+                <div id="catalogChatLog" class="catalog-chat-log" role="log" aria-live="polite"></div>
+                <form id="catalogChatForm" class="catalog-chat-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <label class="visually-hidden" for="catalogChatCategory">{{ t.chat_category_label }}</label>
+                    <select id="catalogChatCategory" name="category" class="form-select" aria-label="{{ t.chat_category_label }}">
+                        <option value="all">{{ t.chat_category_all }}</option>
+                        <option value="available">{{ t.chat_category_available }}</option>
+                        <option value="out">{{ t.chat_category_out }}</option>
+                        <option value="cheapest">{{ t.chat_category_cheapest }}</option>
+                    </select>
+                    <label class="visually-hidden" for="catalogChatQuestion">{{ t.chat_placeholder }}</label>
+                    <input id="catalogChatQuestion" name="question" class="form-control" maxlength="200"
+                           placeholder="{{ t.chat_placeholder }}" autocomplete="off" required>
+                    <button id="catalogChatSend" class="btn btn-primary flex-shrink-0" type="submit">
+                        <i class="bi bi-send me-1"></i>{{ t.chat_send }}
+                    </button>
+                </form>
+            </div>
+        </section>
 
         <section id="overview" class="row g-3 mb-3" aria-label="{{ t.product_summary }}">
             <div class="col-sm-6 col-xl-3">
@@ -296,24 +365,27 @@
                             </thead>
                             <tbody>
                                 {% for p in daftar_produk %}
-                                <tr data-status="{{ p.status_stok }}" data-store="{{ store_for_product[p.id] }}" data-price="{{ p.harga if p.harga is not none else '' }}">
+                                {% set display_stock_status = status_for_product[p.id] %}
+                                <tr data-status="{{ display_stock_status }}" data-store="{{ store_for_product[p.id] }}" data-price="{{ p.harga if p.harga is not none else '' }}">
                                     <td class="text-secondary small">{{ loop.index }}</td>
                                     <td class="product-name">
                                         <div class="nama-item">{{ p.nama_produk }}</div>
+                                        {% if p.varian_produk %}<div class="small text-secondary fw-normal">{{ t.variant }}: {{ p.varian_produk }}</div>{% endif %}
                                         <a class="source-link" href="{{ p.url_sumber }}" target="_blank" rel="noopener noreferrer">{{ t.source }} <i class="bi bi-box-arrow-up-right ms-1"></i></a>
                                     </td>
                                     <td class="small text-secondary">{{ store_for_product[p.id] }}</td>
                                     <td class="text-nowrap fw-semibold">{% if p.harga is not none %}{{ p.harga|idr }}{% else %}<span class="text-secondary small">{{ t.price_unavailable }}</span>{% endif %}</td>
                                     <td>
-                                        {% if p.status_stok == 'TERSEDIA' %}
+                                        {% if display_stock_status == 'TERSEDIA' %}
                                             <span class="stock-pill stock-ready"><i class="bi bi-check-circle-fill"></i>{{ t.available }}</span>
-                                        {% elif p.status_stok == 'HABIS' %}
+                                        {% elif display_stock_status == 'HABIS' %}
                                             <span class="stock-pill stock-empty"><i class="bi bi-x-circle-fill"></i>{{ t.out_of_stock }}</span>
-                                        {% elif p.status_stok == 'TIDAK DIKETAHUI' %}
+                                        {% elif display_stock_status == 'TIDAK DIKETAHUI' %}
                                             <span class="stock-pill stock-other"><i class="bi bi-question-circle"></i>{{ t.unknown_stock }}</span>
                                         {% else %}
-                                            <span class="stock-pill stock-other">{{ p.status_stok }}</span>
+                                            <span class="stock-pill stock-other">{{ display_stock_status }}</span>
                                         {% endif %}
+                                        {% if p.stok_kuantitas is not none %}<div class="small text-secondary mt-1">{{ p.stok_kuantitas }} {{ t.units }}</div>{% endif %}
                                     </td>
                                     <td class="text-secondary small text-nowrap">{{ p.terakhir_dicek|jakarta }}</td>
                                 </tr>
@@ -407,7 +479,164 @@
     </div>
 
     <script>
+        const catalogChatHistory = [];
+        let catalogChatOpen = false;
+
+        function initializeCatalogChat() {
+            const chatSection = document.getElementById('catalog-chat');
+            const chatLog = document.getElementById('catalogChatLog');
+            const chatForm = document.getElementById('catalogChatForm');
+            const chatLauncher = document.getElementById('catalogChatLauncher');
+            const chatWindow = document.getElementById('catalogChatWindow');
+            const chatMinimize = document.getElementById('catalogChatMinimize');
+            if (!chatSection || !chatLog || !chatForm) return;
+
+            function setChatOpen(open, focusInput = false) {
+                catalogChatOpen = open;
+                chatSection.classList.toggle('is-open', open);
+                chatLauncher?.setAttribute('aria-expanded', String(open));
+                chatWindow?.setAttribute('aria-hidden', String(!open));
+                if (open && focusInput) document.getElementById('catalogChatQuestion')?.focus();
+            }
+            setChatOpen(catalogChatOpen);
+            chatLauncher?.addEventListener('click', () => setChatOpen(true, true));
+            chatMinimize?.addEventListener('click', () => setChatOpen(false));
+            document.querySelector('.sidebar-link[href="#catalog-chat"]')?.addEventListener('click', (event) => {
+                event.preventDefault();
+                setChatOpen(true, true);
+            });
+
+            const moneyFormat = new Intl.NumberFormat('id-ID', {
+                style: 'currency', currency: 'IDR', maximumFractionDigits: 0,
+            });
+
+            function renderEntry(entry) {
+                const line = document.createElement('div');
+                line.className = `catalog-chat-line ${entry.role === 'user' ? 'user' : 'assistant'}`;
+                const bubble = document.createElement('div');
+                bubble.className = 'catalog-chat-bubble';
+                const text = document.createElement('div');
+                text.textContent = entry.text;
+                bubble.appendChild(text);
+
+                (entry.products || []).forEach((product) => {
+                    const card = document.createElement('div');
+                    card.className = 'catalog-chat-product';
+                    const name = document.createElement('strong');
+                    name.className = 'd-block';
+                    name.textContent = product.name;
+                    card.appendChild(name);
+
+                    if (product.variant) {
+                        const variant = document.createElement('div');
+                        variant.className = 'small text-secondary';
+                        variant.textContent = `${chatSection.dataset.variantLabel}: ${product.variant}`;
+                        card.appendChild(variant);
+                    }
+
+                    const statusLabel = product.status === 'TERSEDIA'
+                        ? chatSection.dataset.available
+                        : product.status === 'HABIS'
+                            ? chatSection.dataset.outOfStock
+                            : chatSection.dataset.unknownStock;
+                    const details = document.createElement('div');
+                    details.className = 'small text-secondary mt-1';
+                    const quantityLabel = product.stock_quantity == null
+                        ? '' : ` - ${product.stock_quantity} ${chatSection.dataset.unitLabel}`;
+                    details.textContent = `${product.store} - ${product.price == null ? chatSection.dataset.priceMissing : moneyFormat.format(product.price)} - ${statusLabel}${quantityLabel}`;
+                    card.appendChild(details);
+
+                    const checked = document.createElement('div');
+                    checked.className = 'small text-secondary';
+                    checked.textContent = `${chatSection.dataset.lastChecked}: ${product.last_checked}`;
+                    card.appendChild(checked);
+
+                    if (product.source) {
+                        const source = document.createElement('a');
+                        source.className = 'small';
+                        source.href = product.source;
+                        source.target = '_blank';
+                        source.rel = 'noopener noreferrer';
+                        source.textContent = `${chatSection.dataset.source}: ${product.store}`;
+                        card.appendChild(source);
+                    }
+                    bubble.appendChild(card);
+                });
+                line.appendChild(bubble);
+                chatLog.appendChild(line);
+                chatLog.scrollTop = chatLog.scrollHeight;
+            }
+
+            chatLog.replaceChildren();
+            if (catalogChatHistory.length) {
+                catalogChatHistory.forEach(renderEntry);
+            } else {
+                renderEntry({ role: 'assistant', text: chatSection.dataset.chatWelcome });
+            }
+
+            chatForm.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                const questionInput = document.getElementById('catalogChatQuestion');
+                const categorySelect = document.getElementById('catalogChatCategory');
+                const sendButton = document.getElementById('catalogChatSend');
+                const question = questionInput.value.trim();
+                if (!question || sendButton.disabled) return;
+
+                const category = categorySelect.value;
+                const categoryLabel = categorySelect.selectedOptions[0].textContent;
+                const userEntry = { role: 'user', text: `${question} [${categoryLabel}]`, products: [] };
+                catalogChatHistory.push(userEntry);
+                renderEntry(userEntry);
+                questionInput.value = '';
+                sendButton.disabled = true;
+                questionInput.disabled = true;
+
+                const loadingLine = document.createElement('div');
+                loadingLine.className = 'catalog-chat-line assistant';
+                const loadingBubble = document.createElement('div');
+                loadingBubble.className = 'catalog-chat-bubble';
+                loadingBubble.textContent = '...';
+                loadingLine.appendChild(loadingBubble);
+                chatLog.appendChild(loadingLine);
+                chatLog.scrollTop = chatLog.scrollHeight;
+
+                try {
+                    const body = new URLSearchParams({
+                        csrf_token: chatForm.querySelector('[name="csrf_token"]').value,
+                        question,
+                        category,
+                    });
+                    const response = await fetch(chatSection.dataset.endpoint, {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body,
+                    });
+                    if (!response.ok) throw new Error('Catalog request failed');
+                    const result = await response.json();
+                    const assistantEntry = {
+                        role: 'assistant', text: result.message, products: result.products || [],
+                    };
+                    catalogChatHistory.push(assistantEntry);
+                    loadingLine.remove();
+                    renderEntry(assistantEntry);
+                } catch (error) {
+                    loadingLine.remove();
+                    const assistantEntry = {
+                        role: 'assistant', text: chatSection.dataset.chatError, products: [],
+                    };
+                    catalogChatHistory.push(assistantEntry);
+                    renderEntry(assistantEntry);
+                } finally {
+                    sendButton.disabled = false;
+                    questionInput.disabled = false;
+                    questionInput.focus();
+                }
+            });
+        }
+
         function initializeDashboard() {
+        initializeCatalogChat();
         const searchInput = document.getElementById('searchInput');
         const stockFilter = document.getElementById('stockFilter');
         const storeFilter = document.getElementById('storeFilter');
@@ -426,9 +655,26 @@
         const notificationItems = Array.from(document.querySelectorAll('[data-notification-name]'));
         const chartProductsLabel = {{ t.chart_products|tojson }};
         const money = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 });
+        const searchStopWords = new Set(['ada', 'produk', 'barang', 'ini', 'itu', 'gak', 'nggak', 'enggak', 'tidak', 'apakah', 'tolong', 'saya', 'mau', 'cari', 'cek', 'lihat', 'di', 'ke', 'dari', 'untuk', 'yang', 'dan', 'atau', 'berapa', 'harga', 'stok', 'stock', 'ready', 'tersedia', 'termurah', 'murah', 'paling', 'out', 'available', 'is', 'are', 'there', 'any', 'do', 'you', 'have', 'the', 'in', 'please', 'check', 'find', 'price', 'of', 'can', 'has', 'for', 'www', 'com', 'co', 'id']);
+        const searchAliases = { camera: ['camera', 'kamera'], kamera: ['kamera', 'camera'], instant: ['instant', 'instan'], instan: ['instan', 'instant'] };
+
+        function normalizedSearchTerms(value) {
+            return value.toLocaleLowerCase().normalize('NFKD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^a-z0-9]+/g, ' ')
+                .trim().split(/\s+/)
+                .filter((term) => term.length > 1 && !searchStopWords.has(term));
+        }
+
+        function hasEverySearchTerm(value, terms) {
+            if (!terms.length) return false;
+            const available = new Set(normalizedSearchTerms(value));
+            return terms.every((term) => (searchAliases[term] || [term]).some((alias) => available.has(alias)));
+        }
 
         function filterProducts() {
-            const query = searchInput.value.trim().toLocaleLowerCase();
+            const query = searchInput.value.trim();
+            const queryTerms = normalizedSearchTerms(query);
             const hasQuery = query.length > 0;
             const status = stockFilter.value;
             const store = storeFilter.value;
@@ -443,8 +689,9 @@
             sorted.forEach((row) => row.parentElement.appendChild(row));
             const visible = [];
             rows.forEach((row) => {
-                const name = row.querySelector('.nama-item').textContent.toLocaleLowerCase();
-                const matches = (!hasQuery || name.includes(query))
+                const name = row.querySelector('.nama-item').textContent;
+                const searchable = `${name} ${row.dataset.store || ''}`;
+                const matches = (!hasQuery || hasEverySearchTerm(searchable, queryTerms))
                     && (!status || row.dataset.status === status)
                     && (!store || row.dataset.store === store);
                 row.classList.toggle('d-none', !matches);
@@ -459,7 +706,7 @@
 
             let matchingComparisons = 0;
             comparisonRows.forEach((row) => {
-                const matches = !hasQuery || row.dataset.comparisonName.includes(query);
+                const matches = !hasQuery || hasEverySearchTerm(row.dataset.comparisonName, queryTerms);
                 row.classList.toggle('d-none', !matches);
                 if (matches) matchingComparisons += 1;
             });
@@ -468,7 +715,7 @@
             let matchingNotifications = 0;
             let matchingUnread = 0;
             notificationItems.forEach((item) => {
-                const matches = !hasQuery || item.dataset.notificationName.includes(query);
+                const matches = !hasQuery || hasEverySearchTerm(item.dataset.notificationName, queryTerms);
                 item.classList.toggle('d-none', !matches);
                 if (matches) {
                     matchingNotifications += 1;
@@ -537,7 +784,7 @@
         async function refreshDashboardInBackground() {
             const focusedElement = document.activeElement;
             if (focusedElement && focusedElement.id !== 'searchInput'
-                    && focusedElement.closest('.dashboard-main')
+                    && focusedElement.closest('.dashboard-shell')
                     && focusedElement.matches('input, select, textarea, button')) {
                 return;
             }
@@ -550,6 +797,7 @@
                 store: document.getElementById('storeFilter')?.value || '',
                 stock: document.getElementById('stockFilter')?.value || '',
                 sort: document.getElementById('priceSort')?.value || 'asc',
+                chatCategory: document.getElementById('catalogChatCategory')?.value || 'all',
             };
 
             try {
@@ -572,6 +820,7 @@
                 }
                 refreshedShell.querySelector('#stockFilter').value = filterState.stock;
                 refreshedShell.querySelector('#priceSort').value = filterState.sort;
+                refreshedShell.querySelector('#catalogChatCategory').value = filterState.chatCategory;
                 currentShell.replaceWith(refreshedShell);
                 initializeDashboard();
             } catch (error) {
