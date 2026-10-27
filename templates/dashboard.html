@@ -304,7 +304,15 @@
                             <div class="list-group-item target-item d-flex align-items-start gap-2">
                                 <span class="target-index">{{ loop.index }}</span>
                                 <div class="flex-grow-1 min-w-0">
-                                    <span class="target-url" title="{{ kat.url }}">{{ kat.url }}</span>
+                                    <a class="target-url" href="{{ kat.url }}" title="{{ kat.url }}" target="_blank" rel="noopener noreferrer">{{ kat.url }}</a>
+                                    <div class="mt-2">
+                                        {% set source_status_class = 'text-bg-success' if kat.status_pengecekan == 'BERHASIL' else ('text-bg-warning' if kat.status_pengecekan == 'MEMERIKSA' else ('text-bg-danger' if kat.status_pengecekan in ['AKSES_DIBATASI', 'GAGAL', 'TIDAK_ADA_DATA'] else 'text-bg-secondary')) %}
+                                        <span class="badge rounded-pill {{ source_status_class }}">{{ t.source_check_label }}: {{ t.get('source_status_' ~ kat.status_pengecekan, kat.status_pengecekan) }}</span>
+                                        {% if kat.alasan_pengecekan %}<div class="small text-secondary mt-1">{{ t.get('source_reason_' ~ kat.alasan_pengecekan, kat.alasan_pengecekan) }}</div>{% endif %}
+                                        {% if kat.waktu_pengecekan_terakhir %}<div class="small text-secondary">{{ t.source_last_attempt }}: {{ kat.waktu_pengecekan_terakhir|jakarta }}</div>{% endif %}
+                                        {% if kat.waktu_berhasil_dibaca %}<div class="small text-secondary">{{ t.source_last_success }}: {{ kat.waktu_berhasil_dibaca|jakarta }}</div>{% endif %}
+                                        {% if kat.waktu_cek_berikutnya %}<div class="small text-secondary">{{ t.source_next_check }}: {{ kat.waktu_cek_berikutnya|jakarta }}</div>{% endif %}
+                                    </div>
                                 </div>
                                 <form action="{{ url_for('hapus_url', id=kat.id) }}" method="POST" class="m-0" onsubmit="return confirm('{{ t.confirm_delete }}');">
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -366,26 +374,53 @@
                             <tbody>
                                 {% for p in daftar_produk %}
                                 {% set display_stock_status = status_for_product[p.id] %}
-                                <tr data-status="{{ display_stock_status }}" data-store="{{ store_for_product[p.id] }}" data-price="{{ p.harga if p.harga is not none else '' }}">
+                                {% set variant_stock_status = variant_status_for_product[p.id] %}
+                                {% set shown_price = p.harga if p.harga is not none else p.harga_terakhir_terbaca %}
+                                {% set shown_currency = p.mata_uang if p.harga is not none else p.mata_uang_terakhir %}
+                                <tr data-status="{{ display_stock_status }}" data-store="{{ store_for_product[p.id] }}" data-price="{{ shown_price|money_value(shown_currency) if shown_price is not none else '' }}" data-currency="{{ shown_currency|money_currency }}">
                                     <td class="text-secondary small">{{ loop.index }}</td>
                                     <td class="product-name">
                                         <div class="nama-item">{{ p.nama_produk }}</div>
                                         {% if p.varian_produk %}<div class="small text-secondary fw-normal">{{ t.variant }}: {{ p.varian_produk }}</div>{% endif %}
-                                        <a class="source-link" href="{{ p.url_sumber }}" target="_blank" rel="noopener noreferrer">{{ t.source }} <i class="bi bi-box-arrow-up-right ms-1"></i></a>
+                                        <a class="source-link" href="{{ p.url_produk or p.url_sumber }}" target="_blank" rel="noopener noreferrer">{{ t.source }} · {{ t.source_product if p.url_produk else t.source_listing }} <i class="bi bi-box-arrow-up-right ms-1"></i></a>
                                     </td>
                                     <td class="small text-secondary">{{ store_for_product[p.id] }}</td>
-                                    <td class="text-nowrap fw-semibold">{% if p.harga is not none %}{{ p.harga|idr }}{% else %}<span class="text-secondary small">{{ t.price_unavailable }}</span>{% endif %}</td>
+                                    <td class="text-nowrap fw-semibold">
+                                        {% if shown_price is not none %}
+                                            {{ shown_price|money(shown_currency) }}
+                                            {% if shown_currency == 'SGD' %}<div class="small text-secondary mt-1">{{ shown_currency }} → IDR · {{ shown_currency|money_note }}</div>{% endif %}
+                                            {% if p.waktu_harga_terakhir_terbaca %}<div class="small text-secondary mt-1">{{ t.last_read_price }} &middot; {{ p.waktu_harga_terakhir_terbaca|jakarta }}</div>{% endif %}
+                                        {% else %}<span class="text-secondary small">{{ t.price_unavailable }}</span>{% endif %}
+                                    </td>
                                     <td>
-                                        {% if display_stock_status == 'TERSEDIA' %}
+                                        {% if p.varian_produk %}<div class="small text-secondary mb-1">{{ t.variant_stock }}</div>{% endif %}
+                                        {% if variant_stock_status == 'TERSEDIA' %}
                                             <span class="stock-pill stock-ready"><i class="bi bi-check-circle-fill"></i>{{ t.available }}</span>
-                                        {% elif display_stock_status == 'HABIS' %}
+                                        {% elif variant_stock_status == 'HABIS' %}
                                             <span class="stock-pill stock-empty"><i class="bi bi-x-circle-fill"></i>{{ t.out_of_stock }}</span>
-                                        {% elif display_stock_status == 'TIDAK DIKETAHUI' %}
+                                        {% elif variant_stock_status == 'TIDAK DIKETAHUI' %}
                                             <span class="stock-pill stock-other"><i class="bi bi-question-circle"></i>{{ t.unknown_stock }}</span>
                                         {% else %}
-                                            <span class="stock-pill stock-other">{{ display_stock_status }}</span>
+                                            <span class="stock-pill stock-other">{{ variant_stock_status }}</span>
                                         {% endif %}
-                                        {% if p.stok_kuantitas is not none %}<div class="small text-secondary mt-1">{{ p.stok_kuantitas }} {{ t.units }}</div>{% endif %}
+                                        {% if (variant_stock_status == 'TIDAK DIKETAHUI' or stale_for_product[p.id]) and p.status_terakhir_terverifikasi %}
+                                            {% if stale_for_product[p.id] %}<div class="small text-warning mt-1">{{ t.check_not_verified }}</div>{% endif %}
+                                            <div class="small text-secondary mt-1">{{ t.last_confirmed_stock }}:
+                                                {% if p.status_terakhir_terverifikasi == 'TERSEDIA' %}{{ t.available }}{% else %}{{ t.out_of_stock }}{% endif %}
+                                                · {{ p.waktu_terakhir_terverifikasi|jakarta }}
+                                            </div>
+                                        {% endif %}
+                                        {% set product_source = source_by_url.get(p.url_sumber) %}
+                                        {% if stale_for_product[p.id] and product_source and product_source.alasan_pengecekan %}
+                                            <div class="small text-secondary mt-1">{{ t.get('source_reason_' ~ product_source.alasan_pengecekan, product_source.alasan_pengecekan) }}</div>
+                                        {% endif %}
+                                        {% if display_stock_status != variant_stock_status %}
+                                            <div class="small text-secondary mt-1">{{ t.overall_stock }}:
+                                                {% if display_stock_status == 'TERSEDIA' %}{{ t.available }}
+                                                {% elif display_stock_status == 'HABIS' %}{{ t.out_of_stock }}
+                                                {% else %}{{ t.unknown_stock }}{% endif %}
+                                            </div>
+                                        {% endif %}
                                     </td>
                                     <td class="text-secondary small text-nowrap">{{ p.terakhir_dicek|jakarta }}</td>
                                 </tr>
@@ -414,16 +449,16 @@
                         <tr data-comparison-name="{{ comparison.name|lower }}">
                             <td class="product-name">{{ comparison.name }}</td>
                             <td class="text-nowrap">
-                                <strong class="{% if comparison.best.status == 'TERSEDIA' %}text-success{% else %}text-dark{% endif %}">{{ comparison.best.price|idr }}</strong>
+                                <strong class="{% if comparison.best.status == 'TERSEDIA' %}text-success{% else %}text-dark{% endif %}">{{ comparison.best.price|money(comparison.currency) }}</strong>
                                 <div class="small text-secondary">{{ comparison.best.store }}</div>
                                 {% if comparison.best.status == 'HABIS' %}<span class="badge text-bg-light">{{ t.out_of_stock }}</span>{% elif comparison.best.status == 'TIDAK DIKETAHUI' %}<span class="badge text-bg-light">{{ t.unknown_stock }}</span>{% endif %}
                             </td>
                             <td><div class="comparison-offers">
                                 {% for offer in comparison.offers %}
-                                <div class="comparison-offer"><span>{{ offer.store }}</span><span class="text-nowrap">{{ offer.price|idr }}{% if offer.status == 'HABIS' %}<span class="badge text-bg-light ms-1">{{ t.out_of_stock }}</span>{% elif offer.status == 'TIDAK DIKETAHUI' %}<span class="badge text-bg-light ms-1">{{ t.unknown_stock }}</span>{% endif %}</span></div>
+                                <div class="comparison-offer"><span>{{ offer.store }}</span><span class="text-nowrap">{{ offer.price|money(offer.currency) }}{% if offer.status == 'HABIS' %}<span class="badge text-bg-light ms-1">{{ t.out_of_stock }}</span>{% elif offer.status == 'TIDAK DIKETAHUI' %}<span class="badge text-bg-light ms-1">{{ t.unknown_stock }}</span>{% endif %}</span></div>
                                 {% endfor %}
                             </div></td>
-                            <td class="text-nowrap">{{ comparison.difference|idr }}</td>
+                            <td class="text-nowrap">{{ comparison.difference|money(comparison.currency) }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -454,7 +489,13 @@
                     {% if not notification.sudah_dibaca %}<span class="notification-dot"></span>{% else %}<span class="notification-dot opacity-0"></span>{% endif %}
                     <div class="flex-grow-1 min-w-0">
                         <div class="d-flex flex-wrap justify-content-between gap-2">
+                            {% if notification.sumber_url %}
+                            <a class="small fw-semibold text-decoration-none" href="{{ notification.sumber_url }}" target="_blank" rel="noopener noreferrer">
+                                {{ notification.nama_produk }} <i class="bi bi-box-arrow-up-right ms-1" aria-label="Buka produk di toko"></i>
+                            </a>
+                            {% else %}
                             <strong class="small">{{ notification.nama_produk }}</strong>
+                            {% endif %}
                             <time class="small text-secondary">{{ notification.dibuat_pada|jakarta }}</time>
                         </div>
                         <div class="small text-secondary mt-1">{{ notification.toko }} · {% if notification.jenis == 'stok' %}{{ t.stock_change }}{% else %}{{ t.price_change }}{% endif %}</div>
@@ -462,9 +503,15 @@
                             {% if notification.jenis == 'stok' %}
                                 {% if notification.nilai_lama == 'TERSEDIA' %}{{ t.available }}{% elif notification.nilai_lama == 'HABIS' %}{{ t.out_of_stock }}{% else %}{{ t.unknown_stock }}{% endif %} → {% if notification.nilai_baru == 'TERSEDIA' %}{{ t.available }}{% elif notification.nilai_baru == 'HABIS' %}{{ t.out_of_stock }}{% else %}{{ t.unknown_stock }}{% endif %}
                             {% else %}
-                                {{ notification.nilai_lama|idr }} → {{ notification.nilai_baru|idr }}
+                                {{ notification.nilai_lama|notification_price }} → {{ notification.nilai_baru|notification_price }}
                             {% endif %}
                         </div>
+                        {% if notification.jenis == 'stok' and notification.email_status == 'TERKIRIM' %}
+                            <div class="small text-success mt-1">{{ t.email_sent_label }}{% if notification.email_sent_at %} · {{ notification.email_sent_at|jakarta }}{% endif %}</div>
+                        {% elif notification.jenis == 'stok' and notification.email_status == 'MENUNGGU' %}
+                            <div class="small text-warning mt-1">{% if notification.email_attempts %}{{ t.email_retry_label }}{% else %}{{ t.email_pending_label }}{% endif %}{% if notification.email_next_attempt %} · {{ notification.email_next_attempt|jakarta }}{% endif %}</div>
+                            {% if notification.email_error %}<div class="small text-secondary mt-1">{{ t.email_error_label }}: {{ notification.email_error }}</div>{% endif %}
+                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}
@@ -506,9 +553,9 @@
                 setChatOpen(true, true);
             });
 
-            const moneyFormat = new Intl.NumberFormat('id-ID', {
-                style: 'currency', currency: 'IDR', maximumFractionDigits: 0,
-            });
+            const formatMoney = (value, currency) => currency
+                ? new Intl.NumberFormat('id-ID', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value)
+                : `${Number(value).toLocaleString('id-ID', { maximumFractionDigits: 2 })} (mata uang tidak diketahui)`;
 
             function renderEntry(entry) {
                 const line = document.createElement('div');
@@ -543,7 +590,7 @@
                     details.className = 'small text-secondary mt-1';
                     const quantityLabel = product.stock_quantity == null
                         ? '' : ` - ${product.stock_quantity} ${chatSection.dataset.unitLabel}`;
-                    details.textContent = `${product.store} - ${product.price == null ? chatSection.dataset.priceMissing : moneyFormat.format(product.price)} - ${statusLabel}${quantityLabel}`;
+                    details.textContent = `${product.store} - ${product.price == null ? chatSection.dataset.priceMissing : formatMoney(product.price, product.price_currency)} - ${statusLabel}${quantityLabel}`;
                     card.appendChild(details);
 
                     const checked = document.createElement('div');
@@ -654,7 +701,9 @@
         const notificationsSection = document.getElementById('notifications');
         const notificationItems = Array.from(document.querySelectorAll('[data-notification-name]'));
         const chartProductsLabel = {{ t.chart_products|tojson }};
-        const money = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 });
+        const formatMoney = (value, currency) => currency
+            ? new Intl.NumberFormat('id-ID', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value)
+            : `${Number(value).toLocaleString('id-ID', { maximumFractionDigits: 2 })} (mata uang tidak diketahui)`;
         const searchStopWords = new Set(['ada', 'produk', 'barang', 'ini', 'itu', 'gak', 'nggak', 'enggak', 'tidak', 'apakah', 'tolong', 'saya', 'mau', 'cari', 'cek', 'lihat', 'di', 'ke', 'dari', 'untuk', 'yang', 'dan', 'atau', 'berapa', 'harga', 'stok', 'stock', 'ready', 'tersedia', 'termurah', 'murah', 'paling', 'out', 'available', 'is', 'are', 'there', 'any', 'do', 'you', 'have', 'the', 'in', 'please', 'check', 'find', 'price', 'of', 'can', 'has', 'for', 'www', 'com', 'co', 'id']);
         const searchAliases = { camera: ['camera', 'kamera'], kamera: ['kamera', 'camera'], instant: ['instant', 'instan'], instan: ['instan', 'instant'] };
 
@@ -684,6 +733,8 @@
                 const priceB = b.dataset.price === '' ? Number.NaN : Number(b.dataset.price);
                 if (Number.isNaN(priceA)) return Number.isNaN(priceB) ? 0 : 1;
                 if (Number.isNaN(priceB)) return -1;
+                const currencyOrder = (a.dataset.currency || '').localeCompare(b.dataset.currency || '');
+                if (currencyOrder) return currencyOrder;
                 return direction * (priceA - priceB);
             });
             sorted.forEach((row) => row.parentElement.appendChild(row));
@@ -733,8 +784,9 @@
                 .sort((a, b) => Number(a.dataset.price) - Number(b.dataset.price));
             const stores = new Map();
             pricedRows.forEach((row) => {
-                if (!stores.has(row.dataset.store)) stores.set(row.dataset.store, []);
-                stores.get(row.dataset.store).push(row);
+                const key = `${row.dataset.store} · ${row.dataset.currency || 'mata uang tidak diketahui'}`;
+                if (!stores.has(key)) stores.set(key, []);
+                stores.get(key).push(row);
             });
             priceChart.replaceChildren();
             priceChartEmpty.classList.toggle('d-none', pricedRows.length > 0);
@@ -764,7 +816,7 @@
                     track.appendChild(bar);
                     const value = document.createElement('div');
                     value.className = 'chart-value';
-                    value.textContent = money.format(price);
+                    value.textContent = formatMoney(price, row.dataset.currency);
                     chartRow.append(label, track, value);
                     section.appendChild(chartRow);
                 });
