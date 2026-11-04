@@ -27,6 +27,46 @@ class PriceParserTests(unittest.TestCase):
         self.assertIsNone(monitor.parse_price("Harga hubungi toko"))
 
 
+class TargetUrlTests(unittest.TestCase):
+    def test_tracking_queries_do_not_create_duplicate_marketplace_targets(self):
+        cases = (
+            (
+                "https://www.tokopedia.com/whiteb/item?extParam=search&tracking=123",
+                "https://www.tokopedia.com/whiteb/item",
+            ),
+            (
+                "https://www.lazada.co.id/products/item-i123-s456.html?tracking=abc",
+                "https://www.lazada.co.id/products/item-i123-s456.html",
+            ),
+            (
+                "https://shop.8storeytree.com/products/film?pr_rec_id=xyz",
+                "https://shop.8storeytree.com/products/film",
+            ),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(monitor.canonical_target_url(source), expected)
+
+    def test_shopee_variant_query_is_preserved(self):
+        source = "https://shopee.co.id/item-i123.456?extraParams=%7B%22model%22%3A1%7D"
+        self.assertEqual(monitor.canonical_target_url(source), source)
+
+    def test_empty_query_marker_is_removed(self):
+        self.assertEqual(
+            monitor.canonical_target_url("https://www.lazada.co.id/products/item.html?"),
+            "https://www.lazada.co.id/products/item.html",
+        )
+
+    def test_malformed_url_is_left_for_validation_to_reject(self):
+        malformed = "https://[invalid"
+        self.assertEqual(monitor.canonical_target_url(malformed), malformed)
+        self.assertFalse(monitor.validate_target_url(malformed))
+
+    def test_iqos_indonesia_product_listing_is_allowlisted(self):
+        target = "https://www.iqos.com/id/id/iqos-tembakau-yang-dipanaskan/iqos-terea.html"
+        self.assertTrue(monitor.validate_target_url(target))
+
+
 class StockParserTests(unittest.TestCase):
     def extract_card(self, card_html):
         soup = BeautifulSoup(card_html, "html.parser")
@@ -98,6 +138,77 @@ class StockParserTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in products], ["Instax Mini 13 Camera"])
         self.assertIsNone(products[0]["product_url"])
 
+    def test_iqos_listing_keeps_only_terea_and_reads_price_without_guessing_stock(self):
+        target = "https://www.iqos.com/id/id/iqos-tembakau-yang-dipanaskan/iqos-terea.html"
+        html = (
+            '<li class="product-card"><a href="/id/id/shop/terea-blue">'
+            '<h2>TEREA BLUE PACK</h2></a><span class="price">Rp34.000</span></li>'
+            '<li class="product-card"><h2>IQOS ILUMA I</h2>'
+            '<span class="price">Rp999.000</span></li>'
+        )
+        response = Mock(status_code=200, text=html, headers={})
+        with patch.object(monitor.requests, "get", return_value=response):
+            products = monitor.fetch_catalog_products(target, {"User-Agent": "test"})
+        self.assertEqual([item["name"] for item in products], ["TEREA BLUE PACK"])
+        self.assertEqual(products[0]["price"], Decimal("34000.00"))
+        self.assertEqual(products[0]["price_currency"], "IDR")
+        self.assertEqual(products[0]["status"], "TIDAK DIKETAHUI")
+        self.assertEqual(products[0]["product_url"], "https://www.iqos.com/id/id/shop/terea-blue")
+
+    def test_iqos_product_schema_can_confirm_stock(self):
+        payload = {
+            "@type": "Product",
+            "name": "TEREA BLUE PACK",
+            "offers": {
+                "price": "34000",
+                "priceCurrency": "IDR",
+                "availability": "https://schema.org/InStock",
+            },
+        }
+        soup = BeautifulSoup(
+            '<script type="application/ld+json">'
+            + json.dumps(payload)
+            + "</script>",
+            "html.parser",
+        )
+        product = monitor.extract_products(soup, "www.iqos.com")[0]
+        self.assertEqual(product["price"], Decimal("34000.00"))
+        self.assertEqual(product["status"], "TERSEDIA")
+
+    def test_iqos_direct_terea_page_reads_main_item_and_explicit_sold_out_label(self):
+        target = "https://www.iqos.com/id/id/shop/iqos-terea-passion-fruit-pearl.html"
+        html = (
+            '<main><div class="product-summary"><h1>TEREA PASSION FRUIT PEARL PACK</h1>'
+            '<span class="price">Rp32.000</span><img alt="Stok Habis"></div>'
+            '<section><h2>TEREA Blue Pack</h2><span class="price">Rp34.000</span></section></main>'
+        )
+        response = Mock(status_code=200, text=html, headers={})
+        with patch.object(monitor.requests, "get", return_value=response):
+            products = monitor.fetch_catalog_products(target, {"User-Agent": "test"})
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["name"], "TEREA PASSION FRUIT PEARL PACK")
+        self.assertEqual(products[0]["price"], Decimal("32000.00"))
+        self.assertEqual(products[0]["price_currency"], "IDR")
+        self.assertEqual(products[0]["status"], "HABIS")
+        self.assertEqual(products[0]["product_url"], target)
+
+    def test_iqos_direct_iluma_device_page_reads_price_and_explicit_stock(self):
+        target = "https://www.iqos.com/id/id/shop/iqos-iluma-i-electric-purple-kit.html"
+        html = (
+            '<main><div class="product-summary"><h1>IQOS ILUMA i Kit Electric Purple</h1>'
+            '<span class="price">Rp949.000</span><img alt="Stok Habis"></div>'
+            '<section><h2>TEREA Blue Pack</h2><span class="price">Rp34.000</span></section></main>'
+        )
+        response = Mock(status_code=200, text=html, headers={})
+        with patch.object(monitor.requests, "get", return_value=response):
+            products = monitor.fetch_catalog_products(target, {"User-Agent": "test"})
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["name"], "IQOS ILUMA i Kit Electric Purple")
+        self.assertEqual(products[0]["price"], Decimal("949000.00"))
+        self.assertEqual(products[0]["price_currency"], "IDR")
+        self.assertEqual(products[0]["status"], "HABIS")
+        self.assertEqual(products[0]["product_url"], target)
+
     def test_json_ld_availability_and_price_currency_are_preserved(self):
         payload = {
             "@type": "Product",
@@ -154,6 +265,22 @@ class StockParserTests(unittest.TestCase):
         self.assertEqual(
             monitor.preserve_last_confirmed_stock("TIDAK DIKETAHUI"),
             "TIDAK DIKETAHUI",
+        )
+
+    def test_marketplace_recommendation_text_cannot_set_stock(self):
+        self.assertEqual(
+            monitor._marketplace_stock_status(
+                "Shopee", "", "Rekomendasi: stok tersedia dan hampir habis",
+            ),
+            "TIDAK DIKETAHUI",
+        )
+        self.assertEqual(
+            monitor._marketplace_stock_status("Shopee", "Tersedia 340", ""),
+            "TERSEDIA",
+        )
+        self.assertEqual(
+            monitor._marketplace_stock_status("Lazada", "Stok habis", ""),
+            "HABIS",
         )
 
 
@@ -219,6 +346,79 @@ class ShopifyDetailTests(unittest.TestCase):
                 {"User-Agent": "parser-test"},
             )
         self.assertIsNone(result)
+
+
+class TokopediaDetailTests(unittest.TestCase):
+    target = "https://www.tokopedia.com/instaxshop/instax-mini-film-polos"
+
+    def test_matching_product_schema_supplies_name_price_and_stock(self):
+        payload = {
+            "@type": "Product",
+            "name": "Fujifilm Instax Mini Film Plain Polos",
+            "url": self.target,
+            "offers": {
+                "price": "180000",
+                "priceCurrency": "IDR",
+                "availability": "https://schema.org/InStock",
+            },
+        }
+        soup = BeautifulSoup(
+            '<script type="application/ld+json">'
+            + json.dumps(payload)
+            + "</script>",
+            "html.parser",
+        )
+        self.assertEqual(
+            monitor._tokopedia_detail_name(soup, self.target),
+            "Fujifilm Instax Mini Film Plain Polos",
+        )
+        self.assertEqual(
+            monitor._tokopedia_detail_price(soup, self.target), Decimal("180000.00")
+        )
+        self.assertEqual(
+            monitor._tokopedia_schema_product(soup, self.target)["status"],
+            "TERSEDIA",
+        )
+        self.assertEqual(
+            monitor._tokopedia_detail_stock(soup, self.target), "TERSEDIA"
+        )
+
+    def test_unmatched_related_product_schema_is_not_used_for_target(self):
+        payload = {
+            "@type": "Product",
+            "name": "Fujifilm Instax Mini Film Motif",
+            "url": "https://www.tokopedia.com/instaxshop/related-product",
+            "offers": {"price": "999000", "priceCurrency": "IDR"},
+        }
+        soup = BeautifulSoup(
+            '<script type="application/ld+json">'
+            + json.dumps(payload)
+            + "</script>",
+            "html.parser",
+        )
+        self.assertIsNone(monitor._tokopedia_schema_product(soup, self.target))
+        self.assertEqual(monitor._tokopedia_detail_name(soup, self.target), "")
+
+    def test_related_product_stock_does_not_set_main_product_status(self):
+        soup = BeautifulSoup(
+            '<main><section><h1>Fujifilm Instax Mini Film Plain</h1>'
+            '</section><section class="related"><p>Stok: 0</p></section></main>',
+            "html.parser",
+        )
+        self.assertEqual(
+            monitor._tokopedia_detail_stock(soup, self.target),
+            "TIDAK DIKETAHUI",
+        )
+
+    def test_nearby_explicit_stock_count_is_parsed(self):
+        soup = BeautifulSoup(
+            '<main><section><h1>Fujifilm Instax Mini Film Plain</h1>'
+            '<div>Stok Total: 82</div></section></main>',
+            "html.parser",
+        )
+        self.assertEqual(
+            monitor._tokopedia_detail_stock(soup, self.target), "TERSEDIA"
+        )
 
 
 if __name__ == "__main__":

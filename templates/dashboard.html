@@ -506,9 +506,9 @@
                                 {{ notification.nilai_lama|notification_price }} → {{ notification.nilai_baru|notification_price }}
                             {% endif %}
                         </div>
-                        {% if notification.jenis == 'stok' and notification.email_status == 'TERKIRIM' %}
+                        {% if notification.email_status == 'TERKIRIM' %}
                             <div class="small text-success mt-1">{{ t.email_sent_label }}{% if notification.email_sent_at %} · {{ notification.email_sent_at|jakarta }}{% endif %}</div>
-                        {% elif notification.jenis == 'stok' and notification.email_status == 'MENUNGGU' %}
+                        {% elif notification.email_status == 'MENUNGGU' %}
                             <div class="small text-warning mt-1">{% if notification.email_attempts %}{{ t.email_retry_label }}{% else %}{{ t.email_pending_label }}{% endif %}{% if notification.email_next_attempt %} · {{ notification.email_next_attempt|jakarta }}{% endif %}</div>
                             {% if notification.email_error %}<div class="small text-secondary mt-1">{{ t.email_error_label }}: {{ notification.email_error }}</div>{% endif %}
                         {% endif %}
@@ -588,9 +588,7 @@
                             : chatSection.dataset.unknownStock;
                     const details = document.createElement('div');
                     details.className = 'small text-secondary mt-1';
-                    const quantityLabel = product.stock_quantity == null
-                        ? '' : ` - ${product.stock_quantity} ${chatSection.dataset.unitLabel}`;
-                    details.textContent = `${product.store} - ${product.price == null ? chatSection.dataset.priceMissing : formatMoney(product.price, product.price_currency)} - ${statusLabel}${quantityLabel}`;
+                    details.textContent = `${product.store} - ${product.price == null ? chatSection.dataset.priceMissing : formatMoney(product.price, product.price_currency)} - ${statusLabel}`;
                     card.appendChild(details);
 
                     const checked = document.createElement('div');

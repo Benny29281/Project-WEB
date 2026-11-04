@@ -91,7 +91,7 @@ DEFAULT_ALLOWED_HOSTS = (
     "sinarphoto.com,www.sinarphoto.com,borneodigital.co.id,www.borneodigital.co.id,"
     "sentradigital.com,www.sentradigital.com,enterkomputer.com,www.enterkomputer.com,"
     "panoramafoto.co.id,www.panoramafoto.co.id,"
-    "shop.8storeytree.com"
+    "shop.8storeytree.com,iqos.com,www.iqos.com"
 )
 ALLOWED_HOSTS = {
     host.strip().lower().rstrip(".")
@@ -705,9 +705,17 @@ def _send_email_message(email, recipients):
                 smtp.send_message(email, to_addrs=recipients)
         app.logger.info("Email berhasil dikirim")
         return True, None
-    except (OSError, smtplib.SMTPException, ValueError):
-        app.logger.exception("Pengiriman email gagal; periksa konfigurasi SMTP")
-        return False, "Koneksi atau autentikasi SMTP gagal. Periksa pengaturan Gmail dan App Password."
+    except smtplib.SMTPAuthenticationError as exc:
+        app.logger.warning("Autentikasi SMTP ditolak (kode %s)", exc.smtp_code)
+        return False, "Autentikasi SMTP ditolak. Periksa username dan App Password."
+    except smtplib.SMTPServerDisconnected:
+        app.logger.warning(
+            "Server SMTP memutus koneksi; periksa host, port, TLS/SSL, dan jaringan"
+        )
+        return False, "Koneksi SMTP terputus. Periksa host, port, TLS/SSL, dan jaringan."
+    except (OSError, smtplib.SMTPException, ValueError) as exc:
+        app.logger.warning("Pengiriman SMTP gagal (%s)", exc.__class__.__name__)
+        return False, "Pengiriman SMTP gagal. Periksa konfigurasi server dan jaringan."
 
 
 def _email_configuration_error(recipients):
@@ -726,9 +734,47 @@ def _email_configuration_error(recipients):
         int(MAIL_PORT)
     except (TypeError, ValueError):
         missing.append("MAIL_PORT")
+    if MAIL_USE_SSL and MAIL_USE_TLS:
+        missing.append("pilih salah satu: MAIL_USE_SSL atau MAIL_USE_TLS")
     if missing:
         return "Lengkapi konfigurasi ini di file .env: " + ", ".join(missing)
     return None
+
+
+def should_notify_stock_change(previous_status, observed_status, target_has_baseline=False):
+    """Alert confirmed stock transitions and newly discovered available items."""
+    known = {"TERSEDIA", "HABIS"}
+    if observed_status not in known:
+        return False
+    if previous_status in known:
+        return previous_status != observed_status
+    return observed_status == "TERSEDIA" and target_has_baseline
+
+
+def notification_email_content(notification):
+    """Build a message for either a confirmed stock or price notification."""
+    safe_name = re.sub(r"[\r\n]+", " ", notification.nama_produk).strip()
+    if notification.jenis == "harga":
+        subject = f"Harga berubah: {safe_name}"
+        description = "Perubahan harga terdeteksi."
+    else:
+        subject = f"Stok berubah: {safe_name}"
+        description = "Perubahan stok terdeteksi."
+    body = (
+        f"{description}\n\n"
+        f"Produk: {notification.nama_produk}\n"
+        f"Toko: {notification.toko}\n"
+        f"Perubahan: {notification.nilai_lama} -> {notification.nilai_baru}\n"
+        f"Waktu: {format_jakarta(notification.dibuat_pada)}\n"
+        f"Sumber: {notification.sumber_url or 'URL toko tidak tersimpan'}"
+    )
+    return subject, body
+
+
+def notification_retry_delay_minutes(attempts):
+    """Use bounded exponential retry spacing for transient SMTP failures."""
+    safe_attempts = max(1, int(attempts or 1))
+    return min(5 * (2 ** min(safe_attempts - 1, 7)), 360)
 
 
 def process_pending_notification_emails():
@@ -753,27 +799,20 @@ def process_pending_notification_emails():
                 db.session.commit()
 
                 if not error:
-                    old_label = notification.nilai_lama
-                    new_label = notification.nilai_baru
-                    safe_name = re.sub(r"[\r\n]+", " ", notification.nama_produk)
+                    subject, body = notification_email_content(notification)
                     email = EmailMessage()
-                    email["Subject"] = f"Stok {new_label.casefold()}: {safe_name}"
+                    email["Subject"] = subject
                     email["From"] = MAIL_DEFAULT_SENDER
                     email["To"] = "undisclosed-recipients:;"
-                    email.set_content(
-                        f"Perubahan stok terdeteksi.\n\n"
-                        f"Produk: {notification.nama_produk}\n"
-                        f"Toko: {notification.toko}\n"
-                        f"Perubahan: {old_label} -> {new_label}\n"
-                        f"Waktu: {format_jakarta(notification.dibuat_pada)}\n"
-                        f"Sumber: {notification.sumber_url or 'URL toko tidak tersimpan'}"
-                    )
+                    email.set_content(body)
                     sent, error = _send_email_message(email, recipients)
                     if not sent and not error:
                         error = "Pengiriman SMTP belum berhasil."
 
                 if error:
-                    retry_minutes = min(5 * (2 ** min(notification.email_attempts - 1, 7)), 360)
+                    retry_minutes = notification_retry_delay_minutes(
+                        notification.email_attempts
+                    )
                     notification.email_status = "MENUNGGU"
                     notification.email_error = error[:255]
                     notification.email_next_attempt = (
@@ -877,6 +916,30 @@ def validate_target_url(value):
         )
     except ValueError:
         return False
+
+
+def canonical_target_url(value):
+    """Remove tracking-only query strings while retaining variant selectors."""
+    raw_value = (value or "").strip()
+    try:
+        parsed = urlsplit(raw_value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        path = parsed.path or "/"
+    except ValueError:
+        return raw_value
+    # These product identifiers are part of the path. Their query strings are
+    # analytics/recommendation context and otherwise create duplicate targets.
+    if host in {
+        "tokopedia.com", "www.tokopedia.com",
+        "lazada.co.id", "www.lazada.co.id",
+        "shop.8storeytree.com",
+    }:
+        query = ""
+    else:
+        # A bare trailing '?' has no meaning, but keep non-empty query strings
+        # for stores such as Shopee where they can select a product variant.
+        query = parsed.query
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, query, ""))
 
 
 def parse_price(value):
@@ -1135,28 +1198,26 @@ def preserve_last_confirmed_stock(observed_status, last_confirmed_status=None,
     return "TIDAK DIKETAHUI"
 
 
-def _stock_from_purchase_controls(actions, page_text):
-    """Infer stock only from visible cart/buy controls next to a quantity field."""
-    purchase_actions = [
-        action for action in (actions or [])
-        if re.search(
-            r"masukkan\s+(?:ke\s+)?keranjang|beli\s+sekarang|add\s+to\s+cart|buy\s+now",
-            str(action.get("text", "")), re.IGNORECASE,
-        )
-    ]
-    if not purchase_actions:
-        return "TIDAK DIKETAHUI"
-    if all(action.get("disabled") for action in purchase_actions):
+def _marketplace_stock_status(marketplace, indicator="", page_text=""):
+    """Use product-area evidence only; recommendation text is not stock data."""
+    indicator = re.sub(r"\s+", " ", str(indicator or "")).strip().casefold()
+    if re.search(r"\b(?:stok habis|habis|sold out|out of stock)\b", indicator):
         return "HABIS"
-    if (any(not action.get("disabled") for action in purchase_actions)
-            and re.search(r"\b(?:kuantitas|quantity)\b", page_text or "", re.IGNORECASE)):
+    if re.search(r"\b(?:tersedia|tersisa|stok tersedia|in stock)\b", indicator):
         return "TERSEDIA"
+    if (marketplace == "Shopee"
+            and re.search(r"(?:^|\n)\s*habis\s*(?:\n|$)", page_text or "", re.I)):
+        return "HABIS"
+    # A cart button can belong to a recommendation card elsewhere on the page.
+    # Without an explicit product-area signal, leave stock unconfirmed.
     return "TIDAK DIKETAHUI"
 
 
 def _is_direct_product_page(url):
     parts = [part for part in (urlsplit(url).path or "").lower().split("/") if part]
     host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    if host in {"iqos.com", "www.iqos.com"}:
+        return (urlsplit(url).path or "").lower().startswith("/id/id/shop/")
     if host in {"tokopedia.com", "www.tokopedia.com"} and len(parts) >= 2:
         return True
     path = "/" + "/".join(parts) + "/"
@@ -1166,9 +1227,25 @@ def _is_direct_product_page(url):
     )
 
 
-def _tokopedia_detail_stock(soup):
-    """Read Tokopedia's explicit product stock count when present."""
-    text = soup.get_text(" ", strip=True)
+def _tokopedia_detail_stock(soup, target_url=None):
+    """Read stock only from matching Product schema or the heading's nearby area."""
+    if target_url:
+        product = _tokopedia_schema_product(soup, target_url)
+        if product and product.get("status") in {"TERSEDIA", "HABIS"}:
+            return product["status"]
+
+    text = ""
+    heading = soup.select_one("h1")
+    if heading:
+        for parent in heading.parents:
+            if not parent.name or parent.name in {"body", "html", "main"}:
+                break
+            candidate = parent.get_text(" ", strip=True)
+            if len(candidate) > 4000:
+                break
+            if re.search(r"\bStok(?:\s+Total)?\s*:?\s*[\d.,]+\b", candidate, re.I):
+                text = candidate
+                break
     match = (
         re.search(r"\bStok\s+Total\s*:?\s*([\d.,]+)\b", text, re.IGNORECASE)
         or re.search(r"\bStok\s*:\s*([\d.,]+)\b", text, re.IGNORECASE)
@@ -1181,8 +1258,43 @@ def _tokopedia_detail_stock(soup):
     return "TERSEDIA" if int(digits) > 0 else "HABIS"
 
 
-def _tokopedia_detail_price(soup):
-    """Use Tokopedia's product metadata price, stored in rupiah."""
+def _tokopedia_schema_product(soup, target_url):
+    """Return Tokopedia Product JSON-LD that matches the requested item."""
+    target_path = urlsplit(target_url).path.rstrip("/").casefold()
+    candidates = [
+        item for item in _schema_products(soup)
+        if _is_relevant_instax_item(item.get("name", ""))
+    ]
+    exact = [
+        item for item in candidates
+        if item.get("product_url")
+        and urlsplit(urljoin(target_url, item["product_url"])).path.rstrip("/").casefold()
+        == target_path
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if (not exact and len(candidates) == 1
+            and not candidates[0].get("product_url")):
+        return candidates[0]
+    return None
+
+
+def _tokopedia_detail_name(soup, target_url):
+    """Read the main Tokopedia product name from its heading or matching schema."""
+    heading = soup.select_one("h1")
+    name = heading.get_text(" ", strip=True) if heading else ""
+    if _is_relevant_instax_item(name):
+        return name
+    product = _tokopedia_schema_product(soup, target_url)
+    if product:
+        return product["name"]
+    title = soup.select_one('meta[property="og:title"], meta[name="title"]')
+    name = title.get("content", "").strip() if title else ""
+    return name if _is_relevant_instax_item(name) else ""
+
+
+def _tokopedia_detail_price(soup, target_url=None):
+    """Use Tokopedia product metadata or matching Product schema, in rupiah."""
     for selector in ("meta[property='product:price:amount']", "meta[itemprop='price']"):
         node = soup.select_one(selector)
         if node:
@@ -1190,6 +1302,10 @@ def _tokopedia_detail_price(soup):
             price = parse_price(raw)
             if price is not None:
                 return price
+    if target_url:
+        product = _tokopedia_schema_product(soup, target_url)
+        if product and product.get("price") is not None:
+            return product["price"]
     return None
 
 
@@ -1202,6 +1318,98 @@ def _is_relevant_instax_item(name):
         "description", "reviews", "shop all", "find your perfect camera",
     )
     return not any(label in normalized for label in noise)
+
+
+def _is_relevant_iqos_terea_item(name):
+    """Keep the IQOS target scoped to TEREA consumable product listings."""
+    normalized = " ".join((name or "").casefold().split())
+    noise = ("quick view", "shop all", "filter", "temukan", "pelajari")
+    return normalized.startswith("terea ") and not any(label in normalized for label in noise)
+
+
+def _is_relevant_iqos_product(name):
+    """Accept direct IQOS ILUMA device pages and TEREA consumable pages."""
+    normalized = " ".join((name or "").casefold().split())
+    if _is_relevant_iqos_terea_item(name):
+        return True
+    is_iluma_device = "iluma" in normalized and (
+        "iqos" in normalized or normalized.startswith("iluma ")
+        or normalized.startswith("paket ")
+    )
+    noise = ("quick view", "shop all", "temukan", "pelajari")
+    return is_iluma_device and not any(label in normalized for label in noise)
+
+
+def _iqos_detail_product(soup, target_url):
+    """Read the main TEREA or ILUMA item from an IQOS detail page."""
+    heading = soup.select_one("main h1, h1[itemprop='name'], h1")
+    name = heading.get_text(" ", strip=True) if heading else ""
+    if not _is_relevant_iqos_product(name):
+        schema_products = [
+            item for item in _schema_products(soup)
+            if _is_relevant_iqos_product(item.get("name", ""))
+        ]
+        target_path = urlsplit(target_url).path.rstrip("/").casefold()
+        exact = [
+            item for item in schema_products
+            if item.get("product_url")
+            and urlsplit(urljoin(target_url, item["product_url"]))
+            .path.rstrip("/").casefold() == target_path
+        ]
+        if len(exact) == 1:
+            return {
+                **exact[0], "price_currency": exact[0].get("price_currency") or "IDR",
+                "product_url": target_url,
+            }
+        return None
+
+    schema_product = next((
+        item for item in _schema_products(soup)
+        if " ".join(item.get("name", "").casefold().split())
+        == " ".join(name.casefold().split())
+    ), {})
+    price = schema_product.get("price")
+    if price is None:
+        for selector in (
+            "meta[property='product:price:amount']",
+            "meta[property='og:price:amount']",
+            "meta[itemprop='price']",
+        ):
+            node = soup.select_one(selector)
+            if node:
+                price = parse_price(node.get("content", ""))
+                if price is not None:
+                    break
+    if price is None and heading:
+        for parent in heading.parents:
+            if not parent.name or parent.name in {"body", "html"}:
+                break
+            if len(parent.get_text(" ", strip=True)) > 8000:
+                break
+            price = _price_in(parent)
+            if price is not None:
+                break
+    if price is None:
+        price = _price_in(soup)
+
+    status = schema_product.get("status", "TIDAK DIKETAHUI")
+    if status == "TIDAK DIKETAHUI":
+        status = _stock_in(soup)
+    if status == "TIDAK DIKETAHUI":
+        alt_labels = {
+            " ".join((node.get("alt") or "").casefold().split())
+            for node in soup.select("img[alt]")
+        }
+        if alt_labels.intersection({"stok habis", "stock habis", "sold out", "out of stock"}):
+            status = "HABIS"
+        elif alt_labels.intersection({"tersedia", "stok tersedia", "in stock", "available"}):
+            status = "TERSEDIA"
+
+    return {
+        "name": name, "price": price,
+        "price_currency": schema_product.get("price_currency") or "IDR",
+        "status": status, "product_url": target_url,
+    }
 
 
 def extract_products(soup, source_host=""):
@@ -1234,6 +1442,9 @@ def extract_products(soup, source_host=""):
             'a[href*="/products/"], a[href*="/product/"], '
             'a[href*="/detail/"]'
         )
+        if (not product_link
+                and source_host in {"iqos.com", "www.iqos.com"}):
+            product_link = card.select_one("a[href]")
         item = {
             "name": name,
             "price": _price_in(card),
@@ -1530,7 +1741,7 @@ def _fetch_rendered_focus_product(target_url):
                 "status": status,
                 "stock_quantity": None,
                 "variant": None,
-                "product_url": final_url,
+                "product_url": target_url,
             }
     except SourceCheckFailure:
         raise
@@ -1706,7 +1917,7 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
                 for (const element of nodes) {
                     const label = (element.innerText || element.textContent || '')
                         .trim().replace(/\\s+/g, ' ').toLocaleLowerCase('id-ID');
-                    if (!/^(tersedia|stok tersedia|stok habis|habis|sold out|out of stock)$/.test(label))
+                    if (!/^(tersedia(?:\\s+[\\d.,]+)?|tersisa\\s+[\\d.,]+|stok tersedia|stok habis|habis|sold out|out of stock)$/.test(label))
                         continue;
                     const rect = element.getBoundingClientRect();
                     if (quantityNodes.some(quantity => {
@@ -1717,19 +1928,6 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
                 }
                 return '';
             }""")
-            purchase_actions = page.locator("button,[role='button'],a").evaluate_all(
-                "elements => elements.filter(element => {"
-                "const text = (element.innerText || element.textContent || '').trim();"
-                "const rect = element.getBoundingClientRect();"
-                "const style = getComputedStyle(element);"
-                "return /masukkan\\s+(?:ke\\s+)?keranjang|beli\\s+sekarang|add\\s+to\\s+cart|buy\\s+now/i.test(text) &&"
-                "rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
-                "}).map(element => ({"
-                "text: (element.innerText || element.textContent || '').trim(),"
-                "disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true' || "
-                "/disabled/i.test((element.className || '').toString()) || getComputedStyle(element).pointerEvents === 'none'"
-                "}))"
-            )
             selected_variant_selector = "button,[role='radio'],[role='option']"
             if marketplace == "Lazada":
                 selected_variant_selector += ", [class*='sku-variable-img-wrap-selected']"
@@ -1855,7 +2053,7 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
                             for (const element of nodes) {
                                 const label = (element.innerText || element.textContent || '')
                                     .trim().replace(/\\s+/g, ' ').toLocaleLowerCase('id-ID');
-                                if (!/^(tersedia|stok tersedia|stok habis|habis|sold out|out of stock)$/.test(label))
+                                if (!/^(tersedia(?:\\s+[\\d.,]+)?|tersisa\\s+[\\d.,]+|stok tersedia|stok habis|habis|sold out|out of stock)$/.test(label))
                                     continue;
                                 const rect = element.getBoundingClientRect();
                                 if (quantityNodes.some(quantity => {
@@ -1869,21 +2067,10 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
                         price: document.querySelector(
                             'meta[property="product:price:amount"],meta[itemprop="price"]'
                         )?.content || [...document.querySelectorAll(
-                            '[data-sqe*="price"],[data-testid*="price"],[class*="price"],[class*="Price"]'
+                            '[data-sqe="price"],[data-testid*="price"],'
+                            + '.product-briefing [class*="price"],.product-briefing [class*="Price"]'
                         )].map(el => (el.innerText || el.textContent || '').trim())
                           .find(text => /Rp\\.?\\s*[\\d.,]+/i.test(text)) || '',
-                        actions: [...document.querySelectorAll('button,[role="button"],a')]
-                          .filter(el => {
-                            const text = (el.innerText || el.textContent || '').trim();
-                            const rect = el.getBoundingClientRect();
-                            const style = getComputedStyle(el);
-                            return /masukkan\s+(?:ke\s+)?keranjang|beli\s+sekarang|add\s+to\s+cart|buy\s+now/i.test(text) &&
-                              rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-                          }).map(el => ({
-                            text: (el.innerText || el.textContent || '').trim(),
-                            disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true' ||
-                              /disabled/i.test((el.className || '').toString()) || getComputedStyle(el).pointerEvents === 'none'
-                          }))
                     })""")
                     variant_snapshots.append({
                         "variant": option_label,
@@ -1945,7 +2132,7 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
             "stock_quantity": None,
             "variant": None,
             "variant_total": None,
-            "product_url": final_url,
+            "product_url": target_url,
         }
     normalized_title = normalize_product_name(title)
     schema_product = next(
@@ -1980,7 +2167,7 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
         for price_node in soup.select(
             '[data-sqe="price"], [data-testid*="price"], '
             '[data-sqe*="price"], .product-briefing [class*="price"], '
-            '.product-briefing [class*="Price"], main [class*="price"], main [class*="Price"]'
+            '.product-briefing [class*="Price"]'
         ):
             price_match = re.search(
                 r"Rp\.?\s*[\d.,]+", price_node.get_text(" ", strip=True),
@@ -1990,26 +2177,10 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
                 price = parse_price(price_match.group(0))
                 if price is not None:
                     break
-    if price is None:
-        # Product detail price is normally the first currency amount in the rendered page.
-        price_match = re.search(r"Rp\.?\s*[\d.,]+", body_text, flags=re.IGNORECASE)
-        if price_match:
-            price = parse_price(price_match.group(0))
     if price is None and schema_product:
         price = schema_product["price"]
 
-    quantity_match = re.search(
-        r"\bkuantitas\b[\s\S]{0,250}?\btersedia\s+([\d.,]+)",
-        lowered_text,
-        flags=re.IGNORECASE,
-    ) or re.search(
-        r"\btersedia\s+([\d.,]+)\b", lowered_text, flags=re.IGNORECASE,
-    ) or re.search(r"\bstok\s*[:=]\s*([\d.,]+)", lowered_text, flags=re.IGNORECASE)
     stock_quantity = None
-    if quantity_match:
-        quantity_digits = re.sub(r"\D", "", quantity_match.group(1))
-        if quantity_digits:
-            stock_quantity = int(quantity_digits)
 
     selected_variants = list(dict.fromkeys(
         label for label in selected_variant_labels
@@ -2021,43 +2192,18 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
     # Do not show Shopee's internal display_model_id as a user-facing variant;
     # use the requested human-readable variant label when the page omits it.
 
-    stock_status = "TIDAK DIKETAHUI"
-    stock_context = re.search(
-        r"\b(?:kuantitas|quantity)\b[\s\S]{0,180}?\b(tersedia|stok tersedia|stok habis|(?<!hampir )habis|sold out|out of stock)\b",
-        lowered_text,
+    stock_status = _marketplace_stock_status(
+        marketplace, stock_indicator, body_text,
     )
-    indicator = (stock_indicator or (stock_context.group(1) if stock_context else "")).casefold()
-    if stock_quantity == 0 or indicator in {"stok habis", "habis", "sold out", "out of stock"} or re.search(
-        r"\bstok\s*:\s*0\b|\bstok\s+(?:habis|kosong)\b|"
-        r"\bstok habis\b|\bstok kosong\b|\bproduk ini (?:sudah|telah) habis\b|"
-        r"\bhabis terjual\b|\bsold out\b|\bout of stock\b|"
-        r"(?:^|\n)\s*habis\s*(?:\n|$)",
-        lowered_text,
-    ) or (marketplace == "Shopee" and re.search(
-            r"(?:^|\n)\s*habis\s*(?:\n|$)", lowered_text
-    )):
-        stock_status = "HABIS"
-    elif indicator in {"tersedia", "stok tersedia"} or (stock_quantity is not None and stock_quantity > 0) or (
-        re.search(
-            r"\bstok\s*[:=]\s*[1-9]\d*\b|\bstok\s+tersedia\b|"
-            r"\btersedia\s+[1-9][\d.,]*\b|\btersisa\s+[1-9][\d.,]*\b|"
-            r"\bin stock\b",
-            lowered_text,
-        )
-    ) or re.search(r"\bhampir\s+habis\b", lowered_text):
-        stock_status = "TERSEDIA"
-    if stock_status == "TIDAK DIKETAHUI":
-        stock_status = _stock_from_purchase_controls(purchase_actions, body_text)
     if (stock_status == "TIDAK DIKETAHUI" and schema_product
             and marketplace != "Shopee"):
         stock_status = schema_product["status"]
     if marketplace == "Lazada":
         # The body also contains recommendations; only accept a stock label
         # located next to the product quantity control or exact Product schema.
-        if stock_indicator in {"tersedia", "stok tersedia"}:
-            stock_status = "TERSEDIA"
-        elif stock_indicator in {"stok habis", "habis", "sold out", "out of stock"}:
-            stock_status = "HABIS"
+        indicator_status = _marketplace_stock_status("Lazada", stock_indicator)
+        if indicator_status in {"TERSEDIA", "HABIS"}:
+            stock_status = indicator_status
         elif schema_product and schema_product["status"] in {"TERSEDIA", "HABIS"}:
             stock_status = schema_product["status"]
         else:
@@ -2067,10 +2213,9 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
     if marketplace == "Shopee" and stock_status == "TIDAK DIKETAHUI":
         app.logger.warning(
             "Shopee tidak dapat memastikan stok: judul=%r teks=%d indikator=%r "
-            "konteks_kuantitas=%r jumlah=%r harga=%r",
+            "harga=%r",
             page_title, len(body_text), stock_indicator,
-            stock_context.group(0)[:180] if stock_context else None,
-            stock_quantity, price,
+            price,
         )
 
     base_product = {
@@ -2081,7 +2226,7 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
         "stock_quantity": stock_quantity,
         "variant": variant_label,
         "variant_total": None,
-        "product_url": final_url,
+        "product_url": target_url,
     }
     if requested_variant_label:
         initially_selected = {
@@ -2112,53 +2257,19 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
         return base_product
 
     products_by_variant = {}
-    sold_out_pattern = re.compile(
-        r"\bstok\s*:\s*0\b|\bstok\s+(?:habis|kosong)\b|"
-        r"\bproduk ini (?:sudah|telah) habis\b|\bhabis terjual\b|\bsold out\b|"
-        r"(?:^|\n)\s*habis\s*(?:\n|$)",
-        re.IGNORECASE,
-    )
-    available_pattern = re.compile(
-        r"\bstok\s+tersedia\b|\btersedia\s+[1-9][\d.,]*\b|"
-        r"\btersisa\s+[1-9][\d.,]*\b|\bin stock\b",
-        re.IGNORECASE,
-    )
     for snapshot in variant_snapshots:
         output_variant_label = requested_variant_label or snapshot["variant"]
         text = snapshot.get("text", "")
         lowered = text.casefold()
         quantity = None
-        quantity_match = re.search(
-            r"\bkuantitas\b[\s\S]{0,250}?\btersedia\s+([\d.,]+)", lowered,
-        ) or re.search(r"\btersedia\s+([\d.,]+)\b", lowered)
-        if quantity_match:
-            digits = re.sub(r"\D", "", quantity_match.group(1))
-            quantity = int(digits) if digits else None
         snapshot_price = parse_price(snapshot.get("price"))
-        if snapshot_price is None:
-            price_match = re.search(r"Rp\.?\s*[\d.,]+", text, re.IGNORECASE)
-            if price_match:
-                snapshot_price = parse_price(price_match.group(0))
+
 
         snapshot_status = "TIDAK DIKETAHUI"
-        stock_context = re.search(
-            r"\b(?:kuantitas|quantity)\b[\s\S]{0,180}?\b(tersedia|stok tersedia|stok habis|habis|sold out|out of stock)\b",
-            lowered,
-        )
-        indicator = (snapshot.get("stock_indicator") or
-                     (stock_context.group(1) if stock_context else "")).casefold()
         if snapshot.get("clicked") and not snapshot.get("disabled"):
-            if (quantity == 0 or indicator in {"stok habis", "habis", "sold out", "out of stock"}
-                    or sold_out_pattern.search(lowered)):
-                snapshot_status = "HABIS"
-            elif (indicator in {"tersedia", "stok tersedia"}
-                    or (quantity is not None and quantity > 0)
-                    or available_pattern.search(lowered)):
-                snapshot_status = "TERSEDIA"
-            if snapshot_status == "TIDAK DIKETAHUI":
-                snapshot_status = _stock_from_purchase_controls(
-                    snapshot.get("actions"), text,
-                )
+            snapshot_status = _marketplace_stock_status(
+                "Shopee", snapshot.get("stock_indicator"), text,
+            )
 
         initial_selected = {
             label.strip().casefold() for label in selected_variant_labels if label.strip()
@@ -2190,7 +2301,7 @@ def _fetch_rendered_marketplace_product(target_url, marketplace, marketplace_hos
             "stock_quantity": quantity,
             "variant": output_variant_label[:255],
             "variant_total": len({option["label"].casefold() for option in option_labels}),
-            "product_url": final_url,
+            "product_url": target_url,
         }
     variant_products = list(products_by_variant.values())
     # Shopee sometimes lets the option click succeed while its stock/price
@@ -2279,22 +2390,30 @@ def fetch_catalog_products(target_url, headers):
         pages_fetched += 1
         soup = BeautifulSoup(response.text, "html.parser")
         page_products = extract_products(soup, original_host)
+        if (original_host in {"iqos.com", "www.iqos.com"}
+                and _is_direct_product_page(current_url)):
+            iqos_product = _iqos_detail_product(soup, current_url)
+            page_products = [iqos_product] if iqos_product else []
         if (original_host in {"tokopedia.com", "www.tokopedia.com"}
                 and _is_direct_product_page(current_url)):
-            title = soup.select_one("h1")
-            name = title.get_text(" ", strip=True) if title else ""
+            name = _tokopedia_detail_name(soup, current_url)
             if _is_relevant_instax_item(name):
                 page_products = [{
                     "name": name,
-                    "price": _tokopedia_detail_price(soup),
+                    "price": _tokopedia_detail_price(soup, current_url),
                     "price_currency": "IDR",
-                    "status": _tokopedia_detail_stock(soup),
+                    "status": _tokopedia_detail_stock(soup, current_url),
                     "product_url": current_url,
                 }]
             else:
                 page_products = []
         if _is_direct_product_page(current_url):
             target_path = urlsplit(current_url).path.rstrip("/").casefold()
+            is_relevant_product = (
+                _is_relevant_iqos_product
+                if original_host in {"iqos.com", "www.iqos.com"}
+                else _is_relevant_instax_item
+            )
             matching_products = [
                 item for item in page_products
                 if item.get("product_url")
@@ -2302,7 +2421,7 @@ def fetch_catalog_products(target_url, headers):
                 == target_path
             ]
             if matching_products and any(
-                _is_relevant_instax_item(item.get("name", ""))
+                is_relevant_product(item.get("name", ""))
                 for item in matching_products
             ):
                 page_products = matching_products
@@ -2317,7 +2436,7 @@ def fetch_catalog_products(target_url, headers):
                      == " ".join(main_name.casefold().split())),
                     None,
                 )
-                if _is_relevant_instax_item(main_name):
+                if is_relevant_product(main_name):
                     main_product = dict(matching_title or {
                         "name": main_name,
                         "price": None,
@@ -2356,17 +2475,31 @@ def fetch_catalog_products(target_url, headers):
                     item["price_currency"] = "IDR"
             if (original_host in {"tokopedia.com", "www.tokopedia.com"}
                     and _is_direct_product_page(current_url)):
-                tokopedia_price = _tokopedia_detail_price(soup)
-                tokopedia_stock = _tokopedia_detail_stock(soup)
+                tokopedia_price = _tokopedia_detail_price(soup, current_url)
+                tokopedia_stock = _tokopedia_detail_stock(soup, current_url)
                 for item in page_products:
                     if tokopedia_price is not None:
                         item["price"] = tokopedia_price
                     item["price_currency"] = "IDR"
                     item["status"] = tokopedia_stock
+        relevant_item = (
+            (_is_relevant_iqos_product if _is_direct_product_page(current_url)
+             else _is_relevant_iqos_terea_item)
+            if original_host in {"iqos.com", "www.iqos.com"}
+            else _is_relevant_instax_item
+        )
         page_products = [
             item for item in page_products
-            if _is_relevant_instax_item(item.get("name", ""))
+            if relevant_item(item.get("name", ""))
         ]
+        if _is_direct_product_page(current_url):
+            # Do not attach related-product cards to a monitored detail URL.
+            target_path = urlsplit(current_url).path.rstrip("/").casefold()
+            page_products = [
+                item for item in page_products
+                if urlsplit(urljoin(current_url, item.get("product_url") or current_url))
+                .path.rstrip("/").casefold() == target_path
+            ]
         if (not page_products and original_host == "shop.8storeytree.com"
                 and "/products/" in urlsplit(current_url).path):
             title = soup.select_one("h1")
@@ -2507,6 +2640,7 @@ def jalankan_pengecekan_stok(target_urls=None):
                         continue
                 try:
                     # A previous cooldown has expired; this is a new attempt.
+                    target_has_baseline = bool(kategori.waktu_berhasil_dibaca)
                     kategori.waktu_cek_berikutnya = None
                     set_target_check_state(kategori, "MEMERIKSA")
                     db.session.commit()
@@ -2613,24 +2747,14 @@ def jalankan_pengecekan_stok(target_urls=None):
                                 product["status"], previous_confirmed_status,
                                 row.status_stok,
                             )
-                            if (previous_confirmed_status in {"TERSEDIA", "HABIS"}
-                                    and product["status"] in {"TERSEDIA", "HABIS"}
-                                    and previous_confirmed_status != product["status"]):
+                            if should_notify_stock_change(
+                                    previous_confirmed_status, product["status"],
+                                    target_has_baseline):
                                 db.session.add(Notifikasi(
                                     nama_produk=notification_name,
                                     toko=store_name(kategori.url), jenis="stok",
                                     nilai_lama=previous_confirmed_status,
                                     nilai_baru=product["status"],
-                                    sumber_url=product.get("product_url") or kategori.url,
-                                    email_status="MENUNGGU",
-                                ))
-                            elif (shopee_product
-                                  and previous_confirmed_status is None
-                                  and product["status"] == "TERSEDIA"):
-                                db.session.add(Notifikasi(
-                                    nama_produk=notification_name,
-                                    toko=store_name(kategori.url), jenis="stok",
-                                    nilai_lama="TIDAK DIKETAHUI", nilai_baru="TERSEDIA",
                                     sumber_url=product.get("product_url") or kategori.url,
                                     email_status="MENUNGGU",
                                 ))
@@ -2649,6 +2773,8 @@ def jalankan_pengecekan_stok(target_urls=None):
                                     nama_produk=name, toko=store_name(kategori.url), jenis="harga",
                                     nilai_lama=format_money(previous_confirmed_price, previous_price_currency),
                                     nilai_baru=format_money(product["price"], product.get("price_currency")),
+                                    sumber_url=product.get("product_url") or kategori.url,
+                                    email_status="MENUNGGU",
                                 ))
                             row.status_stok = effective_status
                             row.terakhir_dicek = now
@@ -2697,11 +2823,12 @@ def jalankan_pengecekan_stok(target_urls=None):
                                     now if product["price"] is not None else None
                                 ),
                             ))
-                            if shopee_product and product["status"] == "TERSEDIA":
+                            if should_notify_stock_change(
+                                    None, product["status"], target_has_baseline):
                                 db.session.add(Notifikasi(
                                     nama_produk=notification_name,
                                     toko=store_name(kategori.url), jenis="stok",
-                                    nilai_lama="VARIAN BARU", nilai_baru="TERSEDIA",
+                                    nilai_lama="TIDAK DIKETAHUI", nilai_baru="TERSEDIA",
                                     sumber_url=product.get("product_url") or kategori.url,
                                     email_status="MENUNGGU",
                                 ))
@@ -2718,6 +2845,23 @@ def jalankan_pengecekan_stok(target_urls=None):
                                 "Ringkasan varian Shopee %s: %s -> %s",
                                 kategori.url, prior_variant_status, current_variant_status,
                             )
+                    if _is_direct_product_page(kategori.url) and not shopee_product:
+                        observed_products = {
+                            (item["name"].casefold(),
+                             (item.get("variant") or "").casefold())
+                            for item in catalog_products
+                        }
+                        target_path = urlsplit(kategori.url).path.rstrip("/").casefold()
+                        for stale_row in ProdukDetail.query.filter_by(
+                                url_sumber=kategori.url).all():
+                            row_key = (stale_row.nama_produk.casefold(),
+                                       (stale_row.varian_produk or "").casefold())
+                            product_path = urlsplit(
+                                stale_row.url_produk or ""
+                            ).path.rstrip("/").casefold()
+                            if (row_key not in observed_products
+                                    or (product_path and product_path != target_path)):
+                                db.session.delete(stale_row)
                     if shopee_existing_rows:
                         for old_row in shopee_existing_rows:
                             row_key = (
@@ -2955,9 +3099,13 @@ def dashboard():
         # Some Markdown copies escape query separators as \&; normalize before
         # validation/storage so the category filters reach the source unchanged.
         url_baru = (request.form.get("url_produk") or "").strip().replace("\\&", "&")
+        url_baru = canonical_target_url(url_baru)
         if not validate_target_url(url_baru):
             flash("url_invalid")
-        elif KategoriPantauan.query.filter_by(url=url_baru).first():
+        elif any(
+            canonical_target_url(target.url) == url_baru
+            for target in KategoriPantauan.query.all()
+        ):
             flash("url_duplicate")
         else:
             db.session.add(KategoriPantauan(url=url_baru))
